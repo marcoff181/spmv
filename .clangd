@@ -1,0 +1,10 @@
+CompileFlags:
+  Remove:
+    - "-forward-unknown-to-host-compiler"
+    - "--generate-code=*"
+  Add:
+    - "-std=c++17"
+    - "--cuda-gpu-arch=sm_89"
+    # ignore macro conflict between libstdc++ and cuda toolkit when using clang as LSP 
+    - "-D__noinline__=noinline"
+
