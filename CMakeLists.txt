@@ -22,7 +22,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(fast_matrix_market)
 
-add_executable(spmv spmv.cu)
+add_executable(spmv spmv.cu matrix_loader.cpp)
 
 target_link_libraries(spmv
     PRIVATE 

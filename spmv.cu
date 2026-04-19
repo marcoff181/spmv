@@ -1,9 +1,8 @@
-#include "fast_matrix_market/app/triplet.hpp"
+#include "matrix_loader.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cuda_runtime.h>
 #include <driver_types.h>
-#include <fast_matrix_market/fast_matrix_market.hpp>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -82,65 +81,55 @@ int main() {
 
     std::string filename = entry.path().string();
 
-    int64_t num_rows = 0;
-    int64_t num_cols = 0;
-    std::vector<int> rows;
-    std::vector<int> cols;
-    std::vector<float> vals;
-
-    std::ifstream file(filename);
-    if (!file.is_open()) {
-      std::cerr << "Error: Could not open file '" << filename << "'\n";
-      continue;
-    }
-
     try {
-      fast_matrix_market::read_matrix_market_triplet(file, num_rows, num_cols,
-                                                     rows, cols, vals);
+
+      CSR_Matrix mat;
+      load_mtx_file(filename, mat);
 
       std::cout << "Successfully read matrix from: " << filename << "\n";
-      std::cout << "Dimensions: " << num_rows << " x " << num_cols << "\n";
-      std::cout << "Non-zeros:  " << vals.size() << "\n";
+      std::cout << "Dimensions: " << mat.num_rows << " x " << mat.num_cols
+                << "\n";
+      std::cout << "Non-zeros:  " << mat.vals.size() << "\n";
 
-      float *vec = (float *)malloc(sizeof(float) * num_cols);
-      for (int i = 0; i < num_cols; i++) {
+      float *vec = (float *)malloc(sizeof(float) * mat.num_cols);
+      for (int i = 0; i < mat.num_cols; i++) {
         vec[i] = static_cast<float>(rand()) /
                  (static_cast<float>(RAND_MAX / MAX_VECTOR_VALUE));
       };
 
-      float *res_cpu = (float *)malloc(sizeof(float) * num_rows);
-      for (int i = 0; i < num_rows; i++) {
+      float *res_cpu = (float *)malloc(sizeof(float) * mat.num_rows);
+      for (int i = 0; i < mat.num_rows; i++) {
         res_cpu[i] = 0;
       };
       // TODO: maybe use pointers when reading it from the beginning
-      cpu_spmv(num_rows, num_rows, rows.data(), cols.data(), vals.data(), vec,
-               res_cpu);
+      cpu_spmv(mat.num_rows, mat.num_rows, mat.rows.data(), mat.cols.data(),
+               mat.vals.data(), vec, res_cpu);
 
       // ====== GPU memory allocation
       float *gpu_vals, *gpu_vec, *gpu_res, gputime_event;
       int *gpu_rows, *gpu_cols;
-      cudaMalloc(&gpu_rows, rows.size() * sizeof(int));
-      cudaMalloc(&gpu_cols, cols.size() * sizeof(int));
-      cudaMalloc(&gpu_vals, vals.size() * sizeof(float));
-      cudaMalloc(&gpu_vec, num_cols * sizeof(float));
-      cudaMalloc(&gpu_res, num_rows * sizeof(float));
+      cudaMalloc(&gpu_rows, mat.rows.size() * sizeof(int));
+      cudaMalloc(&gpu_cols, mat.cols.size() * sizeof(int));
+      cudaMalloc(&gpu_vals, mat.vals.size() * sizeof(float));
+      cudaMalloc(&gpu_vec, mat.num_cols * sizeof(float));
+      cudaMalloc(&gpu_res, mat.num_rows * sizeof(float));
 
-      cudaMemcpy(gpu_rows, rows.data(), rows.size() * sizeof(int),
+      cudaMemcpy(gpu_rows, mat.rows.data(), mat.rows.size() * sizeof(int),
                  cudaMemcpyDefault);
-      cudaMemcpy(gpu_cols, cols.data(), cols.size() * sizeof(int),
+      cudaMemcpy(gpu_cols, mat.cols.data(), mat.cols.size() * sizeof(int),
                  cudaMemcpyDefault);
-      cudaMemcpy(gpu_vals, vals.data(), vals.size() * sizeof(float),
+      cudaMemcpy(gpu_vals, mat.vals.data(), mat.vals.size() * sizeof(float),
                  cudaMemcpyDefault);
-      cudaMemcpy(gpu_vec, vec, num_cols * sizeof(float), cudaMemcpyDefault);
-      cudaMemset(gpu_res, 0, num_rows * sizeof(float));
+      cudaMemcpy(gpu_vec, vec, mat.num_cols * sizeof(float), cudaMemcpyDefault);
+      cudaMemset(gpu_res, 0, mat.num_rows * sizeof(float));
 
       cudaEvent_t start, stop;
       cudaEventCreate(&start);
       cudaEventCreate(&stop);
 
       cudaEventRecord(start);
-      basic_spmv_kernel<<<1, 32>>>(num_rows, num_cols, gpu_rows, gpu_cols,
-                                   gpu_vals, gpu_vec, gpu_res);
+      basic_spmv_kernel<<<1, 32>>>(mat.num_rows, mat.num_cols, gpu_rows,
+                                   gpu_cols, gpu_vals, gpu_vec, gpu_res);
 
       cudaEventRecord(stop);
       cudaEventSynchronize(stop);
@@ -150,11 +139,11 @@ int main() {
       cudaEventDestroy(start);
       cudaEventDestroy(stop);
 
-      float *spmv_from_gpu_res = (float *)malloc(sizeof(float) * num_rows);
-      cudaMemcpy(spmv_from_gpu_res, gpu_res, num_rows * sizeof(float),
+      float *spmv_from_gpu_res = (float *)malloc(sizeof(float) * mat.num_rows);
+      cudaMemcpy(spmv_from_gpu_res, gpu_res, mat.num_rows * sizeof(float),
                  cudaMemcpyDefault);
 
-      bool equal = compare_vectors(num_rows, res_cpu, spmv_from_gpu_res);
+      bool equal = compare_vectors(mat.num_rows, res_cpu, spmv_from_gpu_res);
 
       printf("the two computations are %d", equal);
 
