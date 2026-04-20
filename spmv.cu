@@ -25,7 +25,7 @@
 #define STR(s) #s
 #define XSTR(s) STR(s)
 
-const std::string MATRIX_FOLDER = "matrixes";
+const std::string MATRIX_FOLDER = "matrices";
 const float MAX_VECTOR_VALUE = 100.0;
 const float ERROR_THRESHOLD = 0.000001;
 

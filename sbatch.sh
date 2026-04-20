@@ -11,6 +11,7 @@
 #SBATCH --output=test-%j.out
 #SBATCH --error=test-%j.err
 
-module load CUDA/11.8.0
+module load CUDA/12.5.0
+module load GCC/13.3.0
 
 ./spmv
