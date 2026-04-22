@@ -29,7 +29,7 @@
 const std::string MATRIX_FOLDER = "matrices";
 const float MAX_VECTOR_VALUE = 100.0;
 // error is defined as percentage, 0.01 = 1% error
-const float ERROR_THRESHOLD = 0.01;
+const double ERROR_THRESHOLD = 0.01;
 
 __global__ void basic_spmv_kernel(int num_rows, int num_cols, int *rows,
                                   int *cols, float *vals, float *vec,
@@ -69,18 +69,6 @@ double l2_error(int len, float *v1, float *v2) {
   double diff_norm = std::sqrt(diff_sum_sq);
 
   return diff_norm / ref_norm;
-}
-
-bool compare_vectors(int len, float *v1, float *v2) {
-  for (int i = 0; i < len; i++) {
-    float diff = abs(v1[i] - v2[i]);
-    float magnitude = std::max(abs(v1[i]), abs(v2[i]));
-
-    if (diff / magnitude > ERROR_THRESHOLD) {
-      return false;
-    }
-  }
-  return true;
 }
 
 namespace fs = std::filesystem;
@@ -175,7 +163,7 @@ int main() {
 
         printf("ERROR OVER THRESHOLD !!!");
       }
-      printf("the error is  %f", err);
+      printf("the error is  %.10e", err);
 
       std::cout << "-------------------------------------------\n\n";
 
