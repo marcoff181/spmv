@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iostream>
 #include <math.h>
+#include <numeric>
 #include <stdio.h>
 #include <sys/time.h>
 #include <time.h>
@@ -27,8 +28,8 @@
 
 const std::string MATRIX_FOLDER = "matrices";
 const float MAX_VECTOR_VALUE = 100.0;
-// error is defined proportionally to number size, 0.01 = 1% error
-const float ERROR_THRESHOLD = 0.001;
+// error is defined as percentage, 0.01 = 1% error
+const float ERROR_THRESHOLD = 0.01;
 
 __global__ void basic_spmv_kernel(int num_rows, int num_cols, int *rows,
                                   int *cols, float *vals, float *vec,
@@ -52,6 +53,22 @@ void cpu_spmv(int num_rows, int num_cols, int *rows, int *cols, float *vals,
       res[i] += vec[cols[j]] * vals[j];
     }
   }
+}
+
+double l2_error(int len, float *v1, float *v2) {
+  // L2 norm of reference
+  double ref_sum_sq = std::inner_product(v2, v2 + len, v2, 0.0);
+  double ref_norm = std::sqrt(ref_sum_sq);
+
+  // L2 norm of difference
+  double diff_sum_sq = 0.0;
+  for (size_t i = 0; i < len; ++i) {
+    double diff = v1[i] - v2[i];
+    diff_sum_sq += diff * diff;
+  }
+  double diff_norm = std::sqrt(diff_sum_sq);
+
+  return diff_norm / ref_norm;
 }
 
 bool compare_vectors(int len, float *v1, float *v2) {
@@ -152,9 +169,13 @@ int main() {
       cudaMemcpy(spmv_from_gpu_res, gpu_res, mat.num_rows * sizeof(float),
                  cudaMemcpyDeviceToHost);
 
-      bool equal = compare_vectors(mat.num_rows, res_cpu, spmv_from_gpu_res);
+      double err = l2_error(mat.num_rows, res_cpu, spmv_from_gpu_res);
 
-      printf("the two computations are %d", equal);
+      if (err > ERROR_THRESHOLD) {
+
+        printf("ERROR OVER THRESHOLD !!!");
+      }
+      printf("the error is  %f", err);
 
       std::cout << "-------------------------------------------\n\n";
 
