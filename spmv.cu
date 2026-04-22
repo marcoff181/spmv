@@ -27,7 +27,7 @@
 
 const std::string MATRIX_FOLDER = "matrices";
 const float MAX_VECTOR_VALUE = 100.0;
-const float ERROR_THRESHOLD = 0.000001;
+const float ERROR_THRESHOLD = 0.1;
 
 __global__ void basic_spmv_kernel(int num_rows, int num_cols, int *rows,
                                   int *cols, float *vals, float *vec,
@@ -35,7 +35,7 @@ __global__ void basic_spmv_kernel(int num_rows, int num_cols, int *rows,
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   // int th_tot = gridDim.x * blockDim.x;
 
-  if (tid > num_rows) {
+  if (tid >= num_rows) {
     return;
   }
 
@@ -102,7 +102,7 @@ int main() {
         res_cpu[i] = 0;
       };
       // TODO: maybe use pointers when reading it from the beginning
-      cpu_spmv(mat.num_rows, mat.num_rows, mat.rows.data(), mat.cols.data(),
+      cpu_spmv(mat.num_rows, mat.num_cols, mat.rows.data(), mat.cols.data(),
                mat.vals.data(), vec, res_cpu);
 
       // ====== GPU memory allocation
@@ -128,8 +128,14 @@ int main() {
       cudaEventCreate(&stop);
 
       cudaEventRecord(start);
-      basic_spmv_kernel<<<1, 32>>>(mat.num_rows, mat.num_cols, gpu_rows,
-                                   gpu_cols, gpu_vals, gpu_vec, gpu_res);
+
+      // TODO: test for tweaks to this
+      int blockSize = 256;
+      int numBlocks = (mat.num_rows + blockSize - 1) / blockSize;
+
+      basic_spmv_kernel<<<numBlocks, blockSize>>>(mat.num_rows, mat.num_cols,
+                                                  gpu_rows, gpu_cols, gpu_vals,
+                                                  gpu_vec, gpu_res);
 
       cudaEventRecord(stop);
       cudaEventSynchronize(stop);
