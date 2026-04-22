@@ -14,4 +14,4 @@
 module load CUDA/12.5.0
 module load GCC/13.3.0
 
-./spmv
+./build/spmv

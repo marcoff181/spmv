@@ -27,7 +27,8 @@
 
 const std::string MATRIX_FOLDER = "matrices";
 const float MAX_VECTOR_VALUE = 100.0;
-const float ERROR_THRESHOLD = 0.1;
+// error is defined proportionally to number size, 0.01 = 1% error
+const float ERROR_THRESHOLD = 0.001;
 
 __global__ void basic_spmv_kernel(int num_rows, int num_cols, int *rows,
                                   int *cols, float *vals, float *vec,
@@ -46,7 +47,6 @@ __global__ void basic_spmv_kernel(int num_rows, int num_cols, int *rows,
 
 void cpu_spmv(int num_rows, int num_cols, int *rows, int *cols, float *vals,
               float *vec, float *res) {
-  int sum;
   for (int i = 0; i < num_rows; ++i) {
     for (int j = rows[i]; j < rows[i + 1]; ++j) {
       res[i] += vec[cols[j]] * vals[j];
@@ -56,8 +56,10 @@ void cpu_spmv(int num_rows, int num_cols, int *rows, int *cols, float *vals,
 
 bool compare_vectors(int len, float *v1, float *v2) {
   for (int i = 0; i < len; i++) {
+    float diff = abs(v1[i] - v2[i]);
+    float magnitude = std::max(abs(v1[i]), abs(v2[i]));
 
-    if (abs(v1[i] - v2[i]) > ERROR_THRESHOLD) {
+    if (diff / magnitude > ERROR_THRESHOLD) {
       return false;
     }
   }
@@ -115,12 +117,13 @@ int main() {
       cudaMalloc(&gpu_res, mat.num_rows * sizeof(float));
 
       cudaMemcpy(gpu_rows, mat.rows.data(), mat.rows.size() * sizeof(int),
-                 cudaMemcpyDefault);
+                 cudaMemcpyHostToDevice);
       cudaMemcpy(gpu_cols, mat.cols.data(), mat.cols.size() * sizeof(int),
-                 cudaMemcpyDefault);
+                 cudaMemcpyHostToDevice);
       cudaMemcpy(gpu_vals, mat.vals.data(), mat.vals.size() * sizeof(float),
-                 cudaMemcpyDefault);
-      cudaMemcpy(gpu_vec, vec, mat.num_cols * sizeof(float), cudaMemcpyDefault);
+                 cudaMemcpyHostToDevice);
+      cudaMemcpy(gpu_vec, vec, mat.num_cols * sizeof(float),
+                 cudaMemcpyHostToDevice);
       cudaMemset(gpu_res, 0, mat.num_rows * sizeof(float));
 
       cudaEvent_t start, stop;
@@ -147,7 +150,7 @@ int main() {
 
       float *spmv_from_gpu_res = (float *)malloc(sizeof(float) * mat.num_rows);
       cudaMemcpy(spmv_from_gpu_res, gpu_res, mat.num_rows * sizeof(float),
-                 cudaMemcpyDefault);
+                 cudaMemcpyDeviceToHost);
 
       bool equal = compare_vectors(mat.num_rows, res_cpu, spmv_from_gpu_res);
 
