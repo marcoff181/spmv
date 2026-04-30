@@ -187,7 +187,9 @@ int main() {
 
       // 4. Allocate Workspace
       void *dBuffer = nullptr;
-      cudaMalloc(&dBuffer, bufferSize);
+      // if cusparse says it wants buffersize zero, cudamalloc just leaves the
+      // nullptr, which makes cusparse crash later
+      cudaMalloc(&dBuffer, bufferSize == 0 ? 1 : bufferSize);
 
       // define the kernels
       std::vector<KernelTask> kernels;
