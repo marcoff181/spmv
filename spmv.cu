@@ -14,6 +14,25 @@
 #define WARMUP 2
 #define NITER 10
 
+#define CHECK_CUDA(func)                                                       \
+  {                                                                            \
+    cudaError_t status = (func);                                               \
+    if (status != cudaSuccess) {                                               \
+      printf("CUDA Error at %s:%d - %s\n", __FILE__, __LINE__,                 \
+             cudaGetErrorString(status));                                      \
+      exit(EXIT_FAILURE);                                                      \
+    }                                                                          \
+  }
+
+#define CHECK_CUSPARSE(func)                                                   \
+  {                                                                            \
+    cusparseStatus_t status = (func);                                          \
+    if (status != CUSPARSE_STATUS_SUCCESS) {                                   \
+      printf("cuSPARSE Error at %s:%d\n", __FILE__, __LINE__);                 \
+      exit(EXIT_FAILURE);                                                      \
+    }                                                                          \
+  }
+
 const std::string MATRIX_FOLDER = "matrices";
 const float MAX_VECTOR_VALUE = 100.0;
 const double ERROR_THRESHOLD = 1e-5;
@@ -150,20 +169,21 @@ int main() {
 
       // 1. Create Matrix Descriptor
       cusparseSpMatDescr_t matA;
-      cusparseCreateCsr(&matA, num_rows, num_cols, nnz, gpu_rows, gpu_cols,
-                        gpu_vals, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
-                        CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+      CHECK_CUSPARSE(cusparseCreateCsr(&matA, num_rows, num_cols, nnz, gpu_rows,
+                                       gpu_cols, gpu_vals, CUSPARSE_INDEX_32I,
+                                       CUSPARSE_INDEX_32I,
+                                       CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F));
 
       // 2. Create Vector Descriptors
       cusparseDnVecDescr_t vecX, vecY;
-      cusparseCreateDnVec(&vecX, num_cols, gpu_vec, CUDA_R_32F);
-      cusparseCreateDnVec(&vecY, num_rows, gpu_res, CUDA_R_32F);
+      CHECK_CUSPARSE(cusparseCreateDnVec(&vecX, num_cols, gpu_vec, CUDA_R_32F));
+      CHECK_CUSPARSE(cusparseCreateDnVec(&vecY, num_rows, gpu_res, CUDA_R_32F));
 
       // 3. Query Workspace Size
       size_t bufferSize = 0;
-      cusparseSpMV_bufferSize(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
-                              matA, vecX, &beta, vecY, CUDA_R_32F,
-                              CUSPARSE_SPMV_ALG_DEFAULT, &bufferSize);
+      CHECK_CUSPARSE(cusparseSpMV_bufferSize(
+          handle, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, vecX, &beta,
+          vecY, CUDA_R_32F, CUSPARSE_SPMV_ALG_DEFAULT, &bufferSize));
 
       // 4. Allocate Workspace
       void *dBuffer = nullptr;
@@ -184,10 +204,10 @@ int main() {
              }});
       }
       kernels.push_back({"CuSparse", dim3(0), dim3(0), [=]() {
-                           cusparseSpMV(
+                           CHECK_CUSPARSE(cusparseSpMV(
                                handle, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
                                matA, vecX, &beta, vecY, CUDA_R_32F,
-                               CUSPARSE_SPMV_ALG_DEFAULT, dBuffer);
+                               CUSPARSE_SPMV_ALG_DEFAULT, dBuffer));
                          }});
 
       for (const KernelTask &task : kernels) {
@@ -195,7 +215,8 @@ int main() {
                  << "Grid:[" << task.grid.x << " " << task.grid.y << " "
                  << task.grid.z << "],"
                  << "Block:[" << task.block.x << " " << task.block.y << " "
-                 << task.block.z << "]\n";
+                 << task.block.z << "]\n"
+                 << "Run, Time(ms), Error\n";
 
         for (int i = -WARMUP; i < NITER; i++) {
           cudaMemset(gpu_res, 0, num_rows * sizeof(float));
@@ -217,12 +238,8 @@ int main() {
             if (err > ERROR_THRESHOLD) {
               printf("ERROR OVER THRESHOLD !!!\n");
             }
-            // printf("Run %d: time %f ms, error is %.10e\n", i + 1, iter_time,
-            // err);
 
-            csv_file << "run" << (i + 1) << "," << iter_time << "," << err
-                     << "\n";
-            std::cout << "-------------------------------------------\n\n";
+            csv_file << (i + 1) << "," << iter_time << "," << err << "\n";
           }
         }
         csv_file << std::flush;
