@@ -4,6 +4,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
+##SBATCH --gres=gpu:a30.24:1
+##SBATCH --gres=gpu:a100.80:1
 #SBATCH --cpus-per-task=1
 #SBATCH --time=00:05:00
 
@@ -13,5 +15,9 @@
 
 module load CUDA/12.5.0
 module load GCC/13.3.0
+
+cmake -B build
+
+cmake --build build
 
 ./build/spmv
