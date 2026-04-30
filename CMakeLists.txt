@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-# set(CMAKE_CUDA_ARCHITECTURES 89) # architecture code for NVIDIA L40S
+# set(CMAKE_CUDA_ARCHITECTURES 89) # arch code for NVIDIA L40S
 set(CMAKE_CUDA_ARCHITECTURES native) # used when running on cluster to handle whatever GPU is found
 
 project(CudaMatrixProject LANGUAGES CXX CUDA)
@@ -24,9 +24,11 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(fast_matrix_market)
 
 add_executable(spmv spmv.cu matrix_loader.cpp)
+find_package(CUDAToolkit REQUIRED)
 
 target_link_libraries(spmv
     PRIVATE 
     m                                      
     fast_matrix_market::fast_matrix_market 
+    CUDA::cusparse
 )

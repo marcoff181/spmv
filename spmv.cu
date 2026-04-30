@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cuda_runtime.h>
+#include <cusparse.h>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -33,7 +34,6 @@ __global__ void basic_spmv_kernel(int num_rows, int num_cols, int *rows,
     return;
   }
 
-  // res[tid] is assumed to be 0 here
   for (int j = rows[tid]; j < rows[tid + 1]; ++j) {
     res[tid] += vec[cols[j]] * vals[j];
   }
@@ -68,7 +68,6 @@ double l2_error(int len, float *reference, float *other) {
 namespace fs = std::filesystem;
 
 int main() {
-  // TODO: decide if to change seed for sequential gens
   srand(0);
 
   if (!fs::exists(MATRIX_FOLDER) || !fs::is_directory(MATRIX_FOLDER)) {
@@ -77,6 +76,17 @@ int main() {
   }
 
   std::ofstream csv_file("results.csv");
+
+  // write GPU info to csv
+  cudaDeviceProp prop;
+  cudaGetDeviceProperties(&prop, 0);
+  float total_mem_gb = prop.totalGlobalMem / 1073741824.0f;
+  csv_file << "GPU_Name,Memory_GB" << std::endl;
+  csv_file << "\"" << prop.name << "\"," << total_mem_gb << std::endl;
+
+  // cusparse setup
+  cusparseHandle_t handle;
+  cusparseCreate(&handle);
 
   for (const auto &entry : fs::directory_iterator(MATRIX_FOLDER)) {
     if (entry.path().extension() != ".mtx")
@@ -91,10 +101,7 @@ int main() {
 
       int num_rows = mtx.num_rows;
       int num_cols = mtx.num_cols;
-
-      std::cout << "Successfully read matrix from: " << filename << "\n";
-      std::cout << "Dimensions: " << num_rows << " x " << num_cols << "\n";
-      std::cout << "Non-zeros:  " << mtx.vals.size() << "\n";
+      long nnz = mtx.vals.size();
 
       // initialize random vector
       float *vec = (float *)malloc(sizeof(float) * num_cols);
@@ -137,30 +144,51 @@ int main() {
 
       float *spmv_from_gpu_res = (float *)malloc(sizeof(float) * num_rows);
 
+      // CuSparse matrix setup
+      float alpha = 1.0f;
+      float beta = 0.0f;
+
+      // 1. Create Matrix Descriptor
+      cusparseSpMatDescr_t matA;
+      cusparseCreateCsr(&matA, num_rows, num_cols, nnz, gpu_rows, gpu_cols,
+                        gpu_vals, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                        CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+
+      // 2. Create Vector Descriptors
+      cusparseDnVecDescr_t vecX, vecY;
+      cusparseCreateDnVec(&vecX, num_cols, gpu_vec, CUDA_R_32F);
+      cusparseCreateDnVec(&vecY, num_rows, gpu_res, CUDA_R_32F);
+
+      // 3. Query Workspace Size
+      size_t bufferSize = 0;
+      cusparseSpMV_bufferSize(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
+                              matA, vecX, &beta, vecY, CUDA_R_32F,
+                              CUSPARSE_SPMV_ALG_DEFAULT, &bufferSize);
+
+      // 4. Allocate Workspace
+      void *dBuffer = nullptr;
+      cudaMalloc(&dBuffer, bufferSize);
+
       // define the kernels
       std::vector<KernelTask> kernels;
-
-      for (int blockSize : {128, 256, 512}) {
-        int numBlocks = (num_rows + blockSize - 1) / blockSize;
-
-        kernels.push_back(
-            {"SpMV_Basic", dim3(numBlocks), dim3(blockSize), [=]() {
-               basic_spmv_kernel<<<numBlocks, blockSize>>>(
-                   num_rows, num_cols, gpu_rows, gpu_cols, gpu_vals, gpu_vec,
-                   gpu_res);
-             }});
-      }
 
       for (int blockSize : {128, 256, 512}) {
 
         int numBlocks = (num_rows + blockSize - 1) / blockSize;
         // [=] is passing by value the pointer reference so it shouild be fine
-        kernels.push_back({"FastBlur", dim3(1024), dim3(blockSize), [=]() {
-                             basic_spmv_kernel<<<numBlocks, blockSize>>>(
-                                 num_rows, num_cols, gpu_rows, gpu_cols,
-                                 gpu_vals, gpu_vec, gpu_res);
-                           }});
+        kernels.push_back(
+            {"Basic Spmv Kernel", dim3(1024), dim3(blockSize), [=]() {
+               basic_spmv_kernel<<<numBlocks, blockSize>>>(
+                   num_rows, num_cols, gpu_rows, gpu_cols, gpu_vals, gpu_vec,
+                   gpu_res);
+             }});
       }
+      kernels.push_back({"CuSparse", dim3(0), dim3(0), [=]() {
+                           cusparseSpMV(
+                               handle, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
+                               matA, vecX, &beta, vecY, CUDA_R_32F,
+                               CUSPARSE_SPMV_ALG_DEFAULT, dBuffer);
+                         }});
 
       for (const KernelTask &task : kernels) {
         csv_file << task.name << " (" << filename << "),"
@@ -215,10 +243,17 @@ int main() {
       cudaFree(gpu_vals);
       cudaFree(gpu_vec);
 
+      cudaFree(dBuffer);
+      cusparseDestroyDnVec(vecX);
+      cusparseDestroyDnVec(vecY);
+      cusparseDestroySpMat(matA);
+
     } catch (const std::exception &e) {
       std::cerr << "Error parsing '" << filename << "': " << e.what() << "\n";
     }
   }
+
+  cusparseDestroy(handle);
 
   csv_file.close();
   return 0;
