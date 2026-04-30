@@ -1,31 +1,14 @@
 #include "matrix_loader.h"
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cuda_runtime.h>
-#include <driver_types.h>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
-#include <math.h>
 #include <numeric>
-#include <stdio.h>
-#include <sys/time.h>
-#include <time.h>
 #include <vector>
-
-#define TIMER_DEF struct timeval temp_1, temp_2
-
-#define TIMER_START gettimeofday(&temp_1, (struct timezone *)0)
-
-#define TIMER_STOP gettimeofday(&temp_2, (struct timezone *)0)
-
-#define TIMER_ELAPSED                                                          \
-  ((temp_2.tv_sec - temp_1.tv_sec) +                                           \
-   (temp_2.tv_usec - temp_1.tv_usec) / 1000000.0)
-
-// #define STR(s) #s
-// #define XSTR(s) STR(s)
 
 #define WARMUP 2
 #define NITER 10
@@ -45,12 +28,12 @@ __global__ void basic_spmv_kernel(int num_rows, int num_cols, int *rows,
                                   int *cols, float *vals, float *vec,
                                   float *res) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  // int th_tot = gridDim.x * blockDim.x;
 
   if (tid >= num_rows) {
     return;
   }
 
+  // res[tid] is assumed to be 0 here
   for (int j = rows[tid]; j < rows[tid + 1]; ++j) {
     res[tid] += vec[cols[j]] * vals[j];
   }
@@ -93,16 +76,18 @@ int main() {
     return 1;
   }
 
+  std::ofstream csv_file("results.csv");
+
   for (const auto &entry : fs::directory_iterator(MATRIX_FOLDER)) {
     if (entry.path().extension() != ".mtx")
       continue;
 
-    std::string filename = entry.path().string();
+    std::string filename = entry.path().filename().string();
 
     try {
       // read matrix
       CSR_Matrix mtx;
-      load_mtx_file(filename, mtx);
+      load_mtx_file(entry.path().string(), mtx);
 
       int num_rows = mtx.num_rows;
       int num_cols = mtx.num_cols;
@@ -123,17 +108,20 @@ int main() {
       for (int i = 0; i < num_rows; i++) {
         cpu_reference[i] = 0;
       };
+
       cpu_spmv(num_rows, num_cols, mtx.rows.data(), mtx.cols.data(),
                mtx.vals.data(), vec, cpu_reference);
 
       // ====== GPU memory allocation
-      float *gpu_vals, *gpu_vec, *gpu_res, gputime_event;
+      float *gpu_vals, *gpu_vec, *gpu_res;
       int *gpu_rows, *gpu_cols;
+
       cudaMalloc(&gpu_rows, mtx.rows.size() * sizeof(int));
       cudaMalloc(&gpu_cols, mtx.cols.size() * sizeof(int));
       cudaMalloc(&gpu_vals, mtx.vals.size() * sizeof(float));
       cudaMalloc(&gpu_vec, num_cols * sizeof(float));
       cudaMalloc(&gpu_res, num_rows * sizeof(float));
+
       cudaMemcpy(gpu_rows, mtx.rows.data(), mtx.rows.size() * sizeof(int),
                  cudaMemcpyHostToDevice);
       cudaMemcpy(gpu_cols, mtx.cols.data(), mtx.cols.size() * sizeof(int),
@@ -153,38 +141,45 @@ int main() {
       std::vector<KernelTask> kernels;
 
       for (int blockSize : {128, 256, 512}) {
-        kernels.push_back({"FastBlur", dim3(1024), dim3(blockSize),
-                           [&gpu_rows, &gpu_cols, &gpu_vals, &gpu_vec, &gpu_res,
-                            num_rows, num_cols, blockSize]() {
-                             int numBlocks =
-                                 (num_rows + blockSize - 1) / blockSize;
+        int numBlocks = (num_rows + blockSize - 1) / blockSize;
+
+        kernels.push_back(
+            {"SpMV_Basic", dim3(numBlocks), dim3(blockSize), [=]() {
+               basic_spmv_kernel<<<numBlocks, blockSize>>>(
+                   num_rows, num_cols, gpu_rows, gpu_cols, gpu_vals, gpu_vec,
+                   gpu_res);
+             }});
+      }
+
+      for (int blockSize : {128, 256, 512}) {
+
+        int numBlocks = (num_rows + blockSize - 1) / blockSize;
+        // [=] is passing by value the pointer reference so it shouild be fine
+        kernels.push_back({"FastBlur", dim3(1024), dim3(blockSize), [=]() {
                              basic_spmv_kernel<<<numBlocks, blockSize>>>(
                                  num_rows, num_cols, gpu_rows, gpu_cols,
                                  gpu_vals, gpu_vec, gpu_res);
                            }});
       }
 
-      std::ofstream csv_file("results.csv");
-
-      // iterate through all kernel executions
       for (const KernelTask &task : kernels) {
-        csv_file << task.name << ","
+        csv_file << task.name << " (" << filename << "),"
                  << "Grid:[" << task.grid.x << " " << task.grid.y << " "
                  << task.grid.z << "],"
                  << "Block:[" << task.block.x << " " << task.block.y << " "
                  << task.block.z << "]\n";
 
-        cudaMemset(gpu_res, 0, num_rows * sizeof(float));
-
         for (int i = -WARMUP; i < NITER; i++) {
+          cudaMemset(gpu_res, 0, num_rows * sizeof(float));
+
           cudaEventRecord(start);
           task.launch();
           cudaEventRecord(stop);
           cudaEventSynchronize(stop);
 
-          ;
           if (i >= 0) {
-            float iter_time = cudaEventElapsedTime(&gputime_event, start, stop);
+            float iter_time = 0.0f;
+            cudaEventElapsedTime(&iter_time, start, stop);
 
             cudaMemcpy(spmv_from_gpu_res, gpu_res, num_rows * sizeof(float),
                        cudaMemcpyDeviceToHost);
@@ -192,38 +187,39 @@ int main() {
             double err = l2_error(num_rows, cpu_reference, spmv_from_gpu_res);
 
             if (err > ERROR_THRESHOLD) {
-              printf("ERROR OVER THRESHOLD !!!");
+              printf("ERROR OVER THRESHOLD !!!\n");
             }
-            printf("the error is  %.10e", err);
+            // printf("Run %d: time %f ms, error is %.10e\n", i + 1, iter_time,
+            // err);
+
             csv_file << "run" << (i + 1) << "," << iter_time << "," << err
                      << "\n";
-
             std::cout << "-------------------------------------------\n\n";
           }
-
-          // printf("Iteration %d tooks %lfms\n", i, iter_time);
         }
         csv_file << std::flush;
+        csv_file << "\n";
       }
-      csv_file << "\n";
 
       free(spmv_from_gpu_res);
 
+      free(vec);
+      free(cpu_reference);
+
       cudaEventDestroy(start);
       cudaEventDestroy(stop);
-
-      // ----------------- free GPU variable ---------------------
 
       cudaFree(gpu_rows);
       cudaFree(gpu_cols);
       cudaFree(gpu_res);
       cudaFree(gpu_vals);
       cudaFree(gpu_vec);
-      // TODO: free rest of stuff
+
     } catch (const std::exception &e) {
       std::cerr << "Error parsing '" << filename << "': " << e.what() << "\n";
     }
   }
 
+  csv_file.close();
   return 0;
 }
