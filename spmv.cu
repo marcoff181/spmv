@@ -228,6 +228,9 @@ int main() {
           cudaEventRecord(stop);
           cudaEventSynchronize(stop);
 
+          // catch kernel errors
+          CHECK_CUDA(cudaGetLastError());
+
           if (i >= 0) {
             float iter_time = 0.0f;
             cudaEventElapsedTime(&iter_time, start, stop);
