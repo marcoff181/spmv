@@ -9,6 +9,8 @@
 #include <functional>
 #include <iostream>
 #include <numeric>
+#include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
 #include <vector>
 
 #define WARMUP 2
@@ -58,25 +60,28 @@ __global__ void basic_spmv_kernel(int num_rows, int num_cols, int *rows,
   }
 }
 
-void cpu_spmv(int num_rows, int num_cols, int *rows, int *cols, float *vals,
-              float *vec, float *res) {
+void cpu_spmv(int num_rows, int num_cols, const std::vector<int> &csr_rows,
+              const std::vector<int> &cols, const std::vector<float> &vals,
+              const std::vector<float> &vec, std::vector<float> &res) {
   for (int i = 0; i < num_rows; ++i) {
-    for (int j = rows[i]; j < rows[i + 1]; ++j) {
+    for (int j = csr_rows[i]; j < csr_rows[i + 1]; ++j) {
       res[i] += vec[cols[j]] * vals[j];
     }
   }
 }
 
-double l2_error(int len, float *reference, float *other) {
+double l2_error(int len, const std::vector<float> &reference,
+                const std::vector<float> &comparison) {
   // L2 norm of reference
-  double ref_sum_sq =
-      std::inner_product(reference, reference + len, reference, 0.0);
+  double ref_sum_sq = std::inner_product(reference.begin(), reference.end(),
+                                         reference.begin(), 0.0);
   double ref_norm = std::sqrt(ref_sum_sq);
 
   // L2 norm of difference
   double diff_sum_sq = 0.0;
-  for (size_t i = 0; i < len; ++i) {
-    double diff = other[i] - reference[i];
+  for (size_t i = 0; i < reference.size(); ++i) {
+    double diff =
+        static_cast<double>(comparison[i]) - static_cast<double>(reference[i]);
     diff_sum_sq += diff * diff;
   }
   double diff_norm = std::sqrt(diff_sum_sq);
@@ -96,14 +101,14 @@ int main() {
 
   std::ofstream csv_file("results.csv");
 
-  // write GPU info to csv
+  // ====== write GPU info to csv
   cudaDeviceProp prop;
   cudaGetDeviceProperties(&prop, 0);
   float total_mem_gb = prop.totalGlobalMem / 1073741824.0f;
   csv_file << "GPU_Name,Memory_GB" << std::endl;
   csv_file << "\"" << prop.name << "\"," << total_mem_gb << std::endl;
 
-  // cusparse setup
+  // ====== cusparse setup
   cusparseHandle_t handle;
   cusparseCreate(&handle);
 
@@ -114,97 +119,90 @@ int main() {
     std::string filename = entry.path().filename().string();
 
     try {
-      // read matrix
       CSR_Matrix mtx;
       load_mtx_file(entry.path().string(), mtx);
 
       int num_rows = mtx.num_rows;
       int num_cols = mtx.num_cols;
       long nnz = mtx.vals.size();
+      std::vector<int> csr_rows = mtx.csr_rows;
+      std::vector<int> coo_rows = mtx.coo_rows;
+      std::vector<int> cols = mtx.cols;
+      std::vector<float> vals = mtx.vals;
+      std::vector<float> res(num_rows, 0.0);
 
       // initialize random vector
-      float *vec = (float *)malloc(sizeof(float) * num_cols);
+      std::vector<float> vec(num_cols);
       for (int i = 0; i < num_cols; i++) {
         vec[i] = static_cast<float>(rand()) /
                  (static_cast<float>(RAND_MAX / MAX_VECTOR_VALUE));
       };
 
-      // compute once the reference result using cpu
-      float *cpu_reference = (float *)malloc(sizeof(float) * num_rows);
+      // ====== compute reference vector with cpu
+      std::vector<float> cpu_reference(num_rows);
       for (int i = 0; i < num_rows; i++) {
         cpu_reference[i] = 0;
       };
 
-      cpu_spmv(num_rows, num_cols, mtx.rows.data(), mtx.cols.data(),
-               mtx.vals.data(), vec, cpu_reference);
+      cpu_spmv(num_rows, num_cols, csr_rows, cols, vals, vec, cpu_reference);
 
       // ====== GPU memory allocation
       float *gpu_vals, *gpu_vec, *gpu_res;
-      int *gpu_rows, *gpu_cols;
+      int *gpu_csr_rows, *gpu_coo_rows, *gpu_cols;
 
-      cudaMalloc(&gpu_rows, mtx.rows.size() * sizeof(int));
-      cudaMalloc(&gpu_cols, mtx.cols.size() * sizeof(int));
-      cudaMalloc(&gpu_vals, mtx.vals.size() * sizeof(float));
+      cudaMalloc(&gpu_csr_rows, csr_rows.size() * sizeof(int));
+      cudaMalloc(&gpu_coo_rows, coo_rows.size() * sizeof(int));
+      cudaMalloc(&gpu_cols, cols.size() * sizeof(int));
+      cudaMalloc(&gpu_vals, vals.size() * sizeof(float));
       cudaMalloc(&gpu_vec, num_cols * sizeof(float));
       cudaMalloc(&gpu_res, num_rows * sizeof(float));
 
-      cudaMemcpy(gpu_rows, mtx.rows.data(), mtx.rows.size() * sizeof(int),
+      cudaMemcpy(gpu_csr_rows, csr_rows.data(), csr_rows.size() * sizeof(int),
                  cudaMemcpyHostToDevice);
-      cudaMemcpy(gpu_cols, mtx.cols.data(), mtx.cols.size() * sizeof(int),
+      cudaMemcpy(gpu_coo_rows, coo_rows.data(), coo_rows.size() * sizeof(int),
                  cudaMemcpyHostToDevice);
-      cudaMemcpy(gpu_vals, mtx.vals.data(), mtx.vals.size() * sizeof(float),
+      cudaMemcpy(gpu_cols, cols.data(), cols.size() * sizeof(int),
                  cudaMemcpyHostToDevice);
-      cudaMemcpy(gpu_vec, vec, num_cols * sizeof(float),
+      cudaMemcpy(gpu_vals, vals.data(), vals.size() * sizeof(float),
+                 cudaMemcpyHostToDevice);
+      cudaMemcpy(gpu_vec, vec.data(), num_cols * sizeof(float),
                  cudaMemcpyHostToDevice);
 
       cudaEvent_t start, stop;
       cudaEventCreate(&start);
       cudaEventCreate(&stop);
 
-      float *spmv_from_gpu_res = (float *)malloc(sizeof(float) * num_rows);
-
-      // CuSparse matrix setup
+      // ====== CuSparse matrix setup
       float alpha = 1.0f;
       float beta = 0.0f;
-
-      // 1. Create Matrix Descriptor
-      cusparseSpMatDescr_t matA;
-      CHECK_CUSPARSE(cusparseCreateCsr(&matA, num_rows, num_cols, nnz, gpu_rows,
-                                       gpu_cols, gpu_vals, CUSPARSE_INDEX_32I,
-                                       CUSPARSE_INDEX_32I,
-                                       CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F));
-
-      // 2. Create Vector Descriptors
+      void *dBuffer = nullptr;
+      size_t bufferSize = 0;
       cusparseDnVecDescr_t vecX, vecY;
+      cusparseSpMatDescr_t matA;
+      CHECK_CUSPARSE(cusparseCreateCsr(&matA, num_rows, num_cols, nnz,
+                                       gpu_csr_rows, gpu_cols, gpu_vals,
+                                       CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                                       CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F));
       CHECK_CUSPARSE(cusparseCreateDnVec(&vecX, num_cols, gpu_vec, CUDA_R_32F));
       CHECK_CUSPARSE(cusparseCreateDnVec(&vecY, num_rows, gpu_res, CUDA_R_32F));
-
-      // 3. Query Workspace Size
-      size_t bufferSize = 0;
       CHECK_CUSPARSE(cusparseSpMV_bufferSize(
           handle, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, vecX, &beta,
           vecY, CUDA_R_32F, CUSPARSE_SPMV_ALG_DEFAULT, &bufferSize));
+      CHECK_CUDA(cudaMalloc(&dBuffer, bufferSize));
 
-      // 4. Allocate Workspace
-      void *dBuffer = nullptr;
-      // if cusparse says it wants buffersize zero, cudamalloc just leaves the
-      // nullptr, which makes cusparse crash later, we set a minimum buffer size
-      CHECK_CUDA(cudaMalloc(&dBuffer, bufferSize < 256 ? 256 : bufferSize));
-
-      // define the kernels
+      // ====== kernels "tasks" list
       std::vector<KernelTask> kernels;
 
       for (int blockSize : {128, 256, 512}) {
-
         int numBlocks = (num_rows + blockSize - 1) / blockSize;
-        // [=] is passing by value the pointer reference so it shouild be fine
         kernels.push_back(
             {"Basic Spmv Kernel", dim3(1024), dim3(blockSize), [=]() {
                basic_spmv_kernel<<<numBlocks, blockSize>>>(
-                   num_rows, num_cols, gpu_rows, gpu_cols, gpu_vals, gpu_vec,
-                   gpu_res);
+                   num_rows, num_cols, gpu_csr_rows, gpu_cols, gpu_vals,
+                   gpu_vec, gpu_res);
              }});
       }
+
       kernels.push_back({"CuSparse", dim3(0), dim3(0), [=]() {
                            CHECK_CUSPARSE(cusparseSpMV(
                                handle, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
@@ -212,6 +210,7 @@ int main() {
                                CUSPARSE_SPMV_ALG_DEFAULT, dBuffer));
                          }});
 
+      // ====== task execution
       for (const KernelTask &task : kernels) {
         csv_file << task.name << " (" << filename << "),"
                  << "Grid:[" << task.grid.x << " " << task.grid.y << " "
@@ -232,10 +231,10 @@ int main() {
             float iter_time = 0.0f;
             CHECK_CUDA(cudaEventElapsedTime(&iter_time, start, stop));
 
-            cudaMemcpy(spmv_from_gpu_res, gpu_res, num_rows * sizeof(float),
+            cudaMemcpy(res.data(), gpu_res, num_rows * sizeof(float),
                        cudaMemcpyDeviceToHost);
 
-            double err = l2_error(num_rows, cpu_reference, spmv_from_gpu_res);
+            double err = l2_error(num_rows, cpu_reference, res);
 
             if (err > ERROR_THRESHOLD) {
               printf("ERROR OVER THRESHOLD !!!\n");
@@ -248,15 +247,11 @@ int main() {
         csv_file << "\n";
       }
 
-      free(spmv_from_gpu_res);
-
-      free(vec);
-      free(cpu_reference);
-
       cudaEventDestroy(start);
       cudaEventDestroy(stop);
 
-      cudaFree(gpu_rows);
+      cudaFree(gpu_csr_rows);
+      cudaFree(gpu_coo_rows);
       cudaFree(gpu_cols);
       cudaFree(gpu_res);
       cudaFree(gpu_vals);

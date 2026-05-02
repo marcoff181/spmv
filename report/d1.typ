@@ -26,6 +26,16 @@
 = Introduction
 https://medium.com/analytics-vidhya/sparse-matrix-vector-multiplication-with-cuda-42d191878e8f
 = Methodology
+== Formats tested
+
+== CPU/GPU implementatioons
+
+== Validation method
+
+== Measurement methodology
+
+== Hardware/Software environment
+
 = Dataset
 == Sparse Matrices
 The dataset chosen for benchmarking the various kernels is a subset of the 14 matrices selected by S.Williams et al.@williams2009spmv  and later also used in a NVIDIA technical report@bellspmv2008, hosted on the SuiteSparse Matrix Collection@suitesparse. This small selection consists of matrices derived from real-world problems in different fields.  The matrices are intentionally varied in dimension, non-zeros per row, existence of dense block structure, and degree of non-zero concentration along the diagonal. @matrix-selection provides a summary of the dataset.
@@ -55,7 +65,7 @@ The dataset chosen for benchmarking the various kernels is a subset of the 14 ma
 ) <matrix-selection>
 
 == Input Vector
-The Input Vector is randomly generated with a fixed seed etc etc
+The `Float32` Input Vector is randomly generated with a fixed seed to guarantee reproducibility across runs. The user-defined parameter `MAX_VECTOR_VALUE` defines the upper bound to the randomly generated values.
 
 = Results
 
