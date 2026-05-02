@@ -188,8 +188,8 @@ int main() {
       // 4. Allocate Workspace
       void *dBuffer = nullptr;
       // if cusparse says it wants buffersize zero, cudamalloc just leaves the
-      // nullptr, which makes cusparse crash later
-      cudaMalloc(&dBuffer, bufferSize == 0 ? 1 : bufferSize);
+      // nullptr, which makes cusparse crash later, we set a minimum buffer size
+      CHECK_CUDA(cudaMalloc(&dBuffer, bufferSize < 256 ? 256 : bufferSize));
 
       // define the kernels
       std::vector<KernelTask> kernels;
@@ -226,14 +226,11 @@ int main() {
           cudaEventRecord(start);
           task.launch();
           cudaEventRecord(stop);
-          cudaEventSynchronize(stop);
-
-          // catch kernel errors
-          CHECK_CUDA(cudaGetLastError());
+          CHECK_CUDA(cudaEventSynchronize(stop));
 
           if (i >= 0) {
             float iter_time = 0.0f;
-            cudaEventElapsedTime(&iter_time, start, stop);
+            CHECK_CUDA(cudaEventElapsedTime(&iter_time, start, stop));
 
             cudaMemcpy(spmv_from_gpu_res, gpu_res, num_rows * sizeof(float),
                        cudaMemcpyDeviceToHost);
