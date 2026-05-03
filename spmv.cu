@@ -65,8 +65,8 @@ __global__ void coo_flat(int nnz, int *coo_rows, int *cols, float *vals,
 
 // Issue with access to cols and vals arrays, even though all items of row are
 // stored next to one another, each thread accesses one at a time
-__global__ void csr_scalar(int num_rows, int num_cols, int *rows, int *cols,
-                           float *vals, float *vec, float *res) {
+__global__ void csr_scalar(int num_rows, int *rows, int *cols, float *vals,
+                           float *vec, float *res) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
   if (tid >= num_rows) {
@@ -78,7 +78,7 @@ __global__ void csr_scalar(int num_rows, int num_cols, int *rows, int *cols,
   }
 }
 
-__global__ void csr_scalar_with_restrict(int num_rows, int num_cols,
+__global__ void csr_scalar_with_restrict(int num_rows,
                                          const int *__restrict__ rows,
                                          const int *__restrict__ cols,
                                          const float *__restrict__ vals,
@@ -92,6 +92,37 @@ __global__ void csr_scalar_with_restrict(int num_rows, int num_cols,
 
   for (int j = rows[tid]; j < rows[tid + 1]; ++j) {
     res[tid] += vec[cols[j]] * vals[j];
+  }
+}
+
+__global__ void csr_vector(int num_rows, int *rows, int *cols, float *vals,
+                           float *vec, float *res) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int warp_id = tid / 32;
+  int lane = tid % 32;
+
+  int row = warp_id;
+
+  if (row >= num_rows) {
+    return;
+  }
+
+  int row_start = rows[row];
+  int row_end = rows[row + 1];
+  float sum = 0.0;
+
+  for (int j = row_start + lane; j < row_end; j += 32) {
+    sum += vec[cols[j]] * vals[j];
+  }
+
+  // threads talk to each other and group the sum
+  for (int offset = 16; offset > 0; offset /= 2) {
+    sum += __shfl_down_sync(0xffffffff, sum, offset);
+  }
+
+  // one thread writes result
+  if (lane == 0) {
+    res[row] += sum;
   }
 }
 
@@ -246,28 +277,39 @@ int main() {
       // ====== kernels "tasks" list
       std::vector<KernelTask> kernels;
 
-      for (int blockSize : {32, 64, 128, 256, 512}) {
+      for (int blockSize : {32, 64, 128, 256, 512, 1024}) {
         int numBlocks = (num_rows + blockSize - 1) / blockSize;
         int cooBlocks = (nnz + blockSize - 1) / blockSize;
         kernels.push_back(
             {"csr scalar", dim3(numBlocks), dim3(blockSize), [=]() {
-               csr_scalar<<<numBlocks, blockSize>>>(num_rows, num_cols,
-                                                    gpu_csr_rows, gpu_cols,
-                                                    gpu_vals, gpu_vec, gpu_res);
+               csr_scalar<<<numBlocks, blockSize>>>(num_rows, gpu_csr_rows,
+                                                    gpu_cols, gpu_vals, gpu_vec,
+                                                    gpu_res);
              }});
 
-        kernels.push_back({"csr scalar with restrict", dim3(numBlocks),
-                           dim3(blockSize), [=]() {
-                             csr_scalar_with_restrict<<<numBlocks, blockSize>>>(
-                                 num_rows, num_cols, gpu_csr_rows, gpu_cols,
-                                 gpu_vals, gpu_vec, gpu_res);
-                           }});
+        kernels.push_back(
+            {"csr scalar restr", dim3(numBlocks), dim3(blockSize), [=]() {
+               csr_scalar_with_restrict<<<numBlocks, blockSize>>>(
+                   num_rows, gpu_csr_rows, gpu_cols, gpu_vals, gpu_vec,
+                   gpu_res);
+             }});
 
         kernels.push_back({"coo flat", dim3(cooBlocks), dim3(blockSize), [=]() {
                              coo_flat<<<cooBlocks, blockSize>>>(
                                  nnz, gpu_coo_rows, gpu_cols, gpu_vals, gpu_vec,
                                  gpu_res);
                            }});
+
+        // 1 warp (32 threads) per row
+        int warpsPerBlock = blockSize / 32;
+        numBlocks = (num_rows + warpsPerBlock - 1) / warpsPerBlock;
+
+        kernels.push_back(
+            {"csr vector", dim3(numBlocks), dim3(blockSize), [=]() {
+               csr_vector<<<numBlocks, blockSize>>>(num_rows, gpu_csr_rows,
+                                                    gpu_cols, gpu_vals, gpu_vec,
+                                                    gpu_res);
+             }});
       }
 
       kernels.push_back({"CuSparse", dim3(0), dim3(0), [=]() {
