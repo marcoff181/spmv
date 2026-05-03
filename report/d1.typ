@@ -34,6 +34,7 @@ CSR still uses three arrays, with the only change being that the rows array is c
 The compression is possible only if the non-zero elements are sorted by row index.
 The CSR format takes less storage than COO, however CSR-based SpMV algorithms that split tasks by row can suffer from load imbalance on sparse matrices with irregular nnz distribution along rows@req1.
 
+// TODO: mention attempt too use restrict to improove performance
 == CPU/GPU implementatioons
 
 == Validation method

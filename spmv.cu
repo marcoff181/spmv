@@ -63,20 +63,6 @@ __global__ void coo_flat(int nnz, int *coo_rows, int *cols, float *vals,
   }
 }
 
-__global__ void
-coo_flat_restrict(const int nnz, const int *__restrict__ coo_rows,
-                  const int *__restrict__ cols, const float *__restrict__ vals,
-                  const float *__restrict__ vec, float *__restrict__ res) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-
-  if (tid < nnz) {
-    int row = coo_rows[tid];
-    int col = cols[tid];
-
-    atomicAdd(&res[row], vals[tid] * vec[col]);
-  }
-}
-
 // Issue with access to cols and vals arrays, even though all items of row are
 // stored next to one another, each thread accesses one at a time
 __global__ void csr_scalar(int num_rows, int *rows, int *cols, float *vals,
@@ -95,62 +81,8 @@ __global__ void csr_scalar(int num_rows, int *rows, int *cols, float *vals,
   res[tid] = sum;
 }
 
-__global__ void csr_scalar_restrict(int num_rows, const int *__restrict__ rows,
-                                    const int *__restrict__ cols,
-                                    const float *__restrict__ vals,
-                                    const float *__restrict__ vec,
-                                    float *__restrict__ res) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-
-  if (tid >= num_rows) {
-    return;
-  }
-
-  float sum = 0.0f;
-
-  for (int j = rows[tid]; j < rows[tid + 1]; ++j) {
-    sum += vec[cols[j]] * vals[j];
-  }
-  res[tid] = sum;
-}
-
 __global__ void csr_vector(int num_rows, int *rows, int *cols, float *vals,
                            float *vec, float *res) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  int warp_id = tid / 32;
-  int lane = tid % 32;
-
-  int row = warp_id;
-
-  if (row >= num_rows) {
-    return;
-  }
-
-  int row_start = rows[row];
-  int row_end = rows[row + 1];
-  float sum = 0.0;
-
-  for (int j = row_start + lane; j < row_end; j += 32) {
-    sum += vec[cols[j]] * vals[j];
-  }
-
-  // threads talk to each other and group the sum
-  for (int offset = 16; offset > 0; offset /= 2) {
-    sum += __shfl_down_sync(0xffffffff, sum, offset);
-  }
-
-  // one thread writes result
-  if (lane == 0) {
-    res[row] += sum;
-  }
-}
-
-__global__ void csr_vector_restrict(const int num_rows,
-                                    const int *__restrict__ rows,
-                                    const int *__restrict__ cols,
-                                    const float *__restrict__ vals,
-                                    const float *__restrict__ vec,
-                                    float *__restrict__ res) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int warp_id = tid / 32;
   int lane = tid % 32;
@@ -343,24 +275,11 @@ int main() {
                                                     gpu_res);
              }});
 
-        kernels.push_back(
-            {"csr scalar restr", dim3(numBlocks), dim3(blockSize), [=]() {
-               csr_scalar_restrict<<<numBlocks, blockSize>>>(
-                   num_rows, gpu_csr_rows, gpu_cols, gpu_vals, gpu_vec,
-                   gpu_res);
-             }});
-
         kernels.push_back({"coo flat", dim3(cooBlocks), dim3(blockSize), [=]() {
                              coo_flat<<<cooBlocks, blockSize>>>(
                                  nnz, gpu_coo_rows, gpu_cols, gpu_vals, gpu_vec,
                                  gpu_res);
                            }});
-
-        kernels.push_back(
-            {"coo flat restr", dim3(cooBlocks), dim3(blockSize), [=]() {
-               coo_flat_restrict<<<cooBlocks, blockSize>>>(
-                   nnz, gpu_coo_rows, gpu_cols, gpu_vals, gpu_vec, gpu_res);
-             }});
 
         // 1 warp (32 threads) per row
         warpsPerBlock = blockSize / 32;
@@ -371,13 +290,6 @@ int main() {
                csr_vector<<<numBlocks, blockSize>>>(num_rows, gpu_csr_rows,
                                                     gpu_cols, gpu_vals, gpu_vec,
                                                     gpu_res);
-             }});
-
-        kernels.push_back(
-            {"csr vector restr", dim3(numBlocks), dim3(blockSize), [=]() {
-               csr_vector_restrict<<<numBlocks, blockSize>>>(
-                   num_rows, gpu_csr_rows, gpu_cols, gpu_vals, gpu_vec,
-                   gpu_res);
              }});
       }
 
