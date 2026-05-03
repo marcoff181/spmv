@@ -35,6 +35,13 @@
     }                                                                          \
   }
 
+// TODO:
+// - FLOPs measurement
+// - COO kernel
+// - more CSR kernels
+// - Cache performance measurements
+// - aggregate csv results for average of runs
+
 const std::string MATRIX_FOLDER = "matrices";
 const float MAX_VECTOR_VALUE = 100.0;
 const double ERROR_THRESHOLD = 1e-5;
@@ -46,9 +53,39 @@ struct KernelTask {
   std::function<void()> launch;
 };
 
-__global__ void basic_spmv_kernel(int num_rows, int num_cols, int *rows,
-                                  int *cols, float *vals, float *vec,
-                                  float *res) {
+__global__ void coo_flat(int nnz, int *coo_rows, int *cols, float *vals,
+                         float *vec, float *res) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (tid < nnz) {
+    int row = coo_rows[tid];
+    int col = cols[tid];
+
+    atomicAdd(&res[row], vals[tid] * vec[col]);
+  }
+}
+
+// Issue with access to cols and vals arrays, even though all items of row are
+// stored next to one another, each thread accesses one at a time
+__global__ void csr_scalar(int num_rows, int num_cols, int *rows, int *cols,
+                           float *vals, float *vec, float *res) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (tid >= num_rows) {
+    return;
+  }
+
+  for (int j = rows[tid]; j < rows[tid + 1]; ++j) {
+    res[tid] += vec[cols[j]] * vals[j];
+  }
+}
+
+__global__ void csr_scalar_with_restrict(int num_rows, int num_cols,
+                                         const int *__restrict__ rows,
+                                         const int *__restrict__ cols,
+                                         const float *__restrict__ vals,
+                                         const float *__restrict__ vec,
+                                         float *__restrict__ res) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
   if (tid >= num_rows) {
@@ -105,8 +142,21 @@ int main() {
   cudaDeviceProp prop;
   cudaGetDeviceProperties(&prop, 0);
   float total_mem_gb = prop.totalGlobalMem / 1073741824.0f;
-  csv_file << "GPU_Name,Memory_GB" << std::endl;
-  csv_file << "\"" << prop.name << "\"," << total_mem_gb << std::endl;
+
+  int max_warps_per_sm = prop.maxThreadsPerMultiProcessor / prop.warpSize;
+  int total_max_concurrent_threads =
+      prop.multiProcessorCount * prop.maxThreadsPerMultiProcessor;
+
+  csv_file << "GPU_Name,Memory_GB,Num_SMs,Max_Threads_Per_SM,Max_Warps_Per_SM,"
+              "Max_Threads_Per_Block,Total_Max_Threads"
+           << std::endl;
+  csv_file << "\"" << prop.name << "\"," // GPU Name (quoted in case of commas)
+           << total_mem_gb << ","        // Total Memory
+           << prop.multiProcessorCount << "," // SM Count
+           << prop.maxThreadsPerMultiProcessor << "," << max_warps_per_sm << ","
+           << prop.maxThreadsPerBlock << ","
+           << total_max_concurrent_threads // Global hardware ceiling
+           << std::endl;
 
   // ====== cusparse setup
   cusparseHandle_t handle;
@@ -193,14 +243,27 @@ int main() {
       // ====== kernels "tasks" list
       std::vector<KernelTask> kernels;
 
-      for (int blockSize : {128, 256, 512}) {
+      for (int blockSize : {32, 64, 128, 256, 512}) {
         int numBlocks = (num_rows + blockSize - 1) / blockSize;
         kernels.push_back(
-            {"Basic Spmv Kernel", dim3(1024), dim3(blockSize), [=]() {
-               basic_spmv_kernel<<<numBlocks, blockSize>>>(
-                   num_rows, num_cols, gpu_csr_rows, gpu_cols, gpu_vals,
-                   gpu_vec, gpu_res);
+            {"csr scalar", dim3(numBlocks), dim3(blockSize), [=]() {
+               csr_scalar<<<numBlocks, blockSize>>>(num_rows, num_cols,
+                                                    gpu_csr_rows, gpu_cols,
+                                                    gpu_vals, gpu_vec, gpu_res);
              }});
+
+        kernels.push_back({"csr scalar with restrict", dim3(numBlocks),
+                           dim3(blockSize), [=]() {
+                             csr_scalar_with_restrict<<<numBlocks, blockSize>>>(
+                                 num_rows, num_cols, gpu_csr_rows, gpu_cols,
+                                 gpu_vals, gpu_vec, gpu_res);
+                           }});
+
+        kernels.push_back({"coo flat", dim3(numBlocks), dim3(blockSize), [=]() {
+                             coo_flat<<<numBlocks, blockSize>>>(
+                                 nnz, gpu_coo_rows, gpu_cols, gpu_vals, gpu_vec,
+                                 gpu_res);
+                           }});
       }
 
       kernels.push_back({"CuSparse", dim3(0), dim3(0), [=]() {

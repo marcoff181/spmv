@@ -27,6 +27,12 @@
 https://medium.com/analytics-vidhya/sparse-matrix-vector-multiplication-with-cuda-42d191878e8f
 = Methodology
 == Formats tested
+The sparse formats used in the study are CSR and COO.
+COO is an obvious starting point as it's the simplest storage format for sparse matrices, and it's used in the SuiteSparse dataset(see @ciao).
+COO uses three arrays to store the matrix: for the $n$-th non-zero element of the matrix `rows[n]` indicates the row where it is located, `cols[n]` indicates the column, and `values[n]` stores the actual value.
+CSR still uses three arrays, with the only change being that the rows array is compressed with a prefix sum.
+The compression is possible only if the non-zero elements are sorted by row index.
+The CSR format takes less storage than COO, however CSR-based SpMV algorithms that split tasks by row can suffer from load imbalance on sparse matrices with irregular nnz distribution along rows@req1.
 
 == CPU/GPU implementatioons
 
@@ -37,7 +43,7 @@ https://medium.com/analytics-vidhya/sparse-matrix-vector-multiplication-with-cud
 == Hardware/Software environment
 
 = Dataset
-== Sparse Matrices
+== Sparse Matrices <ciao>
 The dataset chosen for benchmarking the various kernels is a subset of the 14 matrices selected by S.Williams et al.@williams2009spmv  and later also used in a NVIDIA technical report@bellspmv2008, hosted on the SuiteSparse Matrix Collection@suitesparse. This small selection consists of matrices derived from real-world problems in different fields.  The matrices are intentionally varied in dimension, non-zeros per row, existence of dense block structure, and degree of non-zero concentration along the diagonal. @matrix-selection provides a summary of the dataset.
 
 #figure(
