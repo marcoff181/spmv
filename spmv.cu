@@ -37,14 +37,12 @@
 
 // TODO:
 // - FLOPs measurement
-// - COO kernel
 // - more CSR kernels
 // - Cache performance measurements
-// - aggregate csv results for average of runs
 
 const std::string MATRIX_FOLDER = "matrices";
 const float MAX_VECTOR_VALUE = 100.0;
-const double ERROR_THRESHOLD = 1e-5;
+// const double ERROR_THRESHOLD = 1e-5;
 
 struct KernelTask {
   std::string name;
@@ -161,12 +159,11 @@ int main() {
            << prop.maxThreadsPerBlock << ","
            << total_max_concurrent_threads // Global hardware ceiling
            << std::endl;
+  csv_file << "Matrix,Kernel,Grid_Size,Block_Size,Avg_Time(ms),Avg_Err\n";
 
   // ====== cusparse setup
   cusparseHandle_t handle;
   cusparseCreate(&handle);
-
-  csv_file << "Matrix,Kernel,Grid_Size,Block_Size,Avg_Time(ms),Avg_Err";
 
   for (const auto &entry : fs::directory_iterator(MATRIX_FOLDER)) {
     if (entry.path().extension() != ".mtx")
