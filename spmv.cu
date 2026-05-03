@@ -129,6 +129,10 @@ double l2_error(int len, const std::vector<float> &reference,
 namespace fs = std::filesystem;
 
 int main() {
+
+  double avg_error;
+  float avg_time;
+
   srand(0);
 
   if (!fs::exists(MATRIX_FOLDER) || !fs::is_directory(MATRIX_FOLDER)) {
@@ -161,6 +165,8 @@ int main() {
   // ====== cusparse setup
   cusparseHandle_t handle;
   cusparseCreate(&handle);
+
+  csv_file << "Matrix,Kernel,Grid_Size,Block_Size,Avg_Time(ms),Avg_Err";
 
   for (const auto &entry : fs::directory_iterator(MATRIX_FOLDER)) {
     if (entry.path().extension() != ".mtx")
@@ -245,6 +251,7 @@ int main() {
 
       for (int blockSize : {32, 64, 128, 256, 512}) {
         int numBlocks = (num_rows + blockSize - 1) / blockSize;
+        int cooBlocks = (nnz + blockSize - 1) / blockSize;
         kernels.push_back(
             {"csr scalar", dim3(numBlocks), dim3(blockSize), [=]() {
                csr_scalar<<<numBlocks, blockSize>>>(num_rows, num_cols,
@@ -259,8 +266,8 @@ int main() {
                                  gpu_vals, gpu_vec, gpu_res);
                            }});
 
-        kernels.push_back({"coo flat", dim3(numBlocks), dim3(blockSize), [=]() {
-                             coo_flat<<<numBlocks, blockSize>>>(
+        kernels.push_back({"coo flat", dim3(cooBlocks), dim3(blockSize), [=]() {
+                             coo_flat<<<cooBlocks, blockSize>>>(
                                  nnz, gpu_coo_rows, gpu_cols, gpu_vals, gpu_vec,
                                  gpu_res);
                            }});
@@ -275,13 +282,8 @@ int main() {
 
       // ====== task execution
       for (const KernelTask &task : kernels) {
-        csv_file << task.name << " (" << filename << "),"
-                 << "Grid:[" << task.grid.x << " " << task.grid.y << " "
-                 << task.grid.z << "],"
-                 << "Block:[" << task.block.x << " " << task.block.y << " "
-                 << task.block.z << "]\n"
-                 << "Run, Time(ms), Error\n";
-
+        avg_error = 0.0;
+        avg_time = 0.0;
         for (int i = -WARMUP; i < NITER; i++) {
           cudaMemset(gpu_res, 0, num_rows * sizeof(float));
 
@@ -293,21 +295,25 @@ int main() {
           if (i >= 0) {
             float iter_time = 0.0f;
             CHECK_CUDA(cudaEventElapsedTime(&iter_time, start, stop));
+            avg_time += iter_time;
 
             cudaMemcpy(res.data(), gpu_res, num_rows * sizeof(float),
                        cudaMemcpyDeviceToHost);
-
-            double err = l2_error(num_rows, cpu_reference, res);
-
-            if (err > ERROR_THRESHOLD) {
-              printf("ERROR OVER THRESHOLD !!!\n");
-            }
-
-            csv_file << (i + 1) << "," << iter_time << "," << err << "\n";
+            avg_error += l2_error(num_rows, cpu_reference, res);
           }
         }
+
+        avg_error = avg_error / NITER;
+        avg_time = avg_time / NITER;
+
+        csv_file << filename << "," << task.name << ","
+                 << "G[" << task.grid.x << " " << task.grid.y << " "
+                 << task.grid.z << "],"
+                 << "B[" << task.block.x << " " << task.block.y << " "
+                 << task.block.z << "]," << avg_time << "," << avg_error
+                 << "\n";
+
         csv_file << std::flush;
-        csv_file << "\n";
       }
 
       cudaEventDestroy(start);
