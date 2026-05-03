@@ -87,9 +87,12 @@ __global__ void csr_scalar(int num_rows, int *rows, int *cols, float *vals,
     return;
   }
 
+  float sum = 0.0f;
+
   for (int j = rows[tid]; j < rows[tid + 1]; ++j) {
-    res[tid] += vec[cols[j]] * vals[j];
+    sum += vec[cols[j]] * vals[j];
   }
+  res[tid] = sum;
 }
 
 __global__ void csr_scalar_restrict(int num_rows, const int *__restrict__ rows,
@@ -103,9 +106,12 @@ __global__ void csr_scalar_restrict(int num_rows, const int *__restrict__ rows,
     return;
   }
 
+  float sum = 0.0f;
+
   for (int j = rows[tid]; j < rows[tid + 1]; ++j) {
-    res[tid] += vec[cols[j]] * vals[j];
+    sum += vec[cols[j]] * vals[j];
   }
+  res[tid] = sum;
 }
 
 __global__ void csr_vector(int num_rows, int *rows, int *cols, float *vals,
@@ -238,7 +244,8 @@ int main() {
            << prop.maxThreadsPerBlock << ","
            << total_max_concurrent_threads // Global hardware ceiling
            << std::endl;
-  csv_file << "Matrix,Kernel,Grid_Size,Block_Size,Avg_Time(ms),Avg_Err\n";
+  csv_file << "Matrix,Rows,Columns,nnz,Kernel,Grid_Size,Block_Size,Avg_Time(ms)"
+              ",Avg_Err\n";
 
   // ====== cusparse setup
   cusparseHandle_t handle;
@@ -407,12 +414,9 @@ int main() {
         avg_error = avg_error / NITER;
         avg_time = avg_time / NITER;
 
-        csv_file << filename << "," << task.name << ","
-                 << "G[" << task.grid.x << " " << task.grid.y << " "
-                 << task.grid.z << "],"
-                 << "B[" << task.block.x << " " << task.block.y << " "
-                 << task.block.z << "]," << avg_time << "," << avg_error
-                 << "\n";
+        csv_file << filename << "," << num_rows << "," << num_cols << "," << nnz
+                 << "," << task.name << "," << task.grid.x << ","
+                 << task.block.x << "," << avg_time << "," << avg_error << "\n";
 
         csv_file << std::flush;
       }
