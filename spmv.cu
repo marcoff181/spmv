@@ -9,6 +9,7 @@
 #include <functional>
 #include <iostream>
 #include <numeric>
+#include <string>
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
 #include <vector>
@@ -35,6 +36,10 @@
     }                                                                          \
   }
 
+template <typename T, typename U> inline T div_ceil(T n, U d) {
+  return (n + d - 1) / d;
+}
+
 // TODO:
 // - FLOPs measurement
 // - more CSR kernels
@@ -51,15 +56,106 @@ struct KernelTask {
   std::function<void()> launch;
 };
 
-__global__ void coo_flat(int nnz, int *coo_rows, int *cols, float *vals,
-                         float *vec, float *res) {
+__global__ void coo_flat(int nnz, int *rows, int *cols, float *vals, float *x,
+                         float *y) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
   if (tid < nnz) {
-    int row = coo_rows[tid];
+    int row = rows[tid];
     int col = cols[tid];
 
-    atomicAdd(&res[row], vals[tid] * vec[col]);
+    atomicAdd(&y[row], vals[tid] * x[col]);
+  }
+}
+
+// Adaptation of Graham 2009 COO algo
+// TODO: either remove restrict or add it everywhere
+__global__ void coo_segmented_reduction(int nnz, int chunk_size,
+                                        const int *__restrict__ rows,
+                                        const int *__restrict__ cols,
+                                        const float *__restrict__ vals,
+                                        const float *__restrict__ x,
+                                        float *__restrict__ y) {
+
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int lane = threadIdx.x & 31; // id within the warp (0-31)
+  int warp_id = tid / 32;
+
+  int chunk_start = warp_id * chunk_size;
+  int chunk_end = min(chunk_start + chunk_size, nnz);
+
+  if (chunk_start >= chunk_end)
+    return;
+
+  int first_idx = rows[chunk_start];
+
+  // Registers to hold the "carry" from the previous 32-element loop
+  int carry_row = -1;
+  float carry_val = 0.0f;
+
+  // Loop through this warp's chunk, 32 elements at a time
+  for (int n = chunk_start; n < chunk_end; n += 32) {
+    int idx = n + lane;
+    bool active = (idx < chunk_end); // Handle boundaries cleanly
+
+    // If out of bounds, set row to -1 and val to 0 so math isn't affected
+    int row = active ? rows[idx] : -1;
+    float val = active ? vals[idx] * x[cols[idx]] : 0.0f;
+
+    // the FIRST thread checks if there is a carry and either propagates it or
+    // writes it down(means that he is exactly the one in the new row)
+    if (lane == 0 && n > chunk_start) {
+      if (row == carry_row) {
+        val += carry_val; // Row continues, add the previous sum
+      } else {
+        // Previous row finished. Write it out safely.
+        if (carry_row == first_idx)
+          atomicAdd(&y[carry_row], carry_val);
+        else
+          y[carry_row] += carry_val;
+      }
+    }
+
+    // By the end of this step, the thread situated at the highest lane index
+    // for a specific row holds the accumulated sum of all multiplications for
+    // that row within the current 32-element group.
+    for (int offset = 1; offset < 32; offset *= 2) {
+      int left_row = __shfl_up_sync(0xffffffff, row, offset);
+      float left_val = __shfl_up_sync(0xffffffff, val, offset);
+
+      if (lane >= offset && left_row == row) {
+        val += left_val;
+      }
+    }
+
+    // Look 1 space to the right to see if the row changes
+    int next_row = __shfl_down_sync(0xffffffff, row, 1);
+
+    // Find the last active thread in this loop (usually 31, unless at the very
+    // end of chunk)
+    int last_lane = min(31, chunk_end - 1 - n);
+
+    if (lane == last_lane) {
+      // This is the end of the 32-element window. Save it as the carry.
+      carry_row = row;
+      carry_val = val;
+    } else if (active && row != next_row) {
+      // The row ended inside this 32-element window. Write it out.
+      if (row == first_idx)
+        atomicAdd(&y[row], val);
+      else
+        y[row] += val; // Safe direct write (nobody else is touching this row)
+    }
+
+    // The last thread broadcasts the carry to all other threads in the warp so
+    // Lane 0 can use it on next iteration
+    carry_row = __shfl_sync(0xffffffff, carry_row, last_lane);
+    carry_val = __shfl_sync(0xffffffff, carry_val, last_lane);
+  }
+
+  // write what's left of carry
+  if (lane == 0 && carry_row != -1) {
+    atomicAdd(&y[carry_row], carry_val);
   }
 }
 
@@ -69,55 +165,51 @@ __global__ void csr_scalar(int num_rows, int *rows, int *cols, float *vals,
                            float *vec, float *res) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
-  if (tid >= num_rows) {
-    return;
-  }
+  if (tid < num_rows) {
+    float sum = 0.0f;
 
-  float sum = 0.0f;
-
-  for (int j = rows[tid]; j < rows[tid + 1]; ++j) {
-    sum += vec[cols[j]] * vals[j];
+    for (int j = rows[tid]; j < rows[tid + 1]; ++j) {
+      sum += vec[cols[j]] * vals[j];
+    }
+    res[tid] = sum;
   }
-  res[tid] = sum;
 }
 
 __global__ void csr_vector(int num_rows, int *rows, int *cols, float *vals,
                            float *vec, float *res) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int warp_id = tid / 32;
-  int lane = tid % 32;
+  int lane = tid & 32;
 
   int row = warp_id;
 
-  if (row >= num_rows) {
-    return;
-  }
+  if (row < num_rows) {
+    int row_start = rows[row];
+    int row_end = rows[row + 1];
+    float sum = 0.0;
 
-  int row_start = rows[row];
-  int row_end = rows[row + 1];
-  float sum = 0.0;
+    for (int j = row_start + lane; j < row_end; j += 32) {
+      sum += vec[cols[j]] * vals[j];
+    }
 
-  for (int j = row_start + lane; j < row_end; j += 32) {
-    sum += vec[cols[j]] * vals[j];
-  }
+    // threads talk to each other and group the sum
+    for (int offset = 16; offset > 0; offset /= 2) {
+      sum += __shfl_down_sync(0xffffffff, sum, offset);
+    }
 
-  // threads talk to each other and group the sum
-  for (int offset = 16; offset > 0; offset /= 2) {
-    sum += __shfl_down_sync(0xffffffff, sum, offset);
-  }
-
-  // one thread writes result
-  if (lane == 0) {
-    res[row] += sum;
+    // one thread writes result
+    if (lane == 0) {
+      res[row] += sum;
+    }
   }
 }
 
-void cpu_spmv(int num_rows, int num_cols, const std::vector<int> &csr_rows,
+void cpu_spmv(int m, int n, const std::vector<int> &rows,
               const std::vector<int> &cols, const std::vector<float> &vals,
-              const std::vector<float> &vec, std::vector<float> &res) {
-  for (int i = 0; i < num_rows; ++i) {
-    for (int j = csr_rows[i]; j < csr_rows[i + 1]; ++j) {
-      res[i] += vec[cols[j]] * vals[j];
+              const std::vector<float> &x, std::vector<float> &y) {
+  for (int i = 0; i < m; ++i) {
+    for (int j = rows[i]; j < rows[i + 1]; ++j) {
+      y[i] += x[cols[j]] * vals[j];
     }
   }
 }
@@ -193,40 +285,37 @@ int main() {
       CSR_Matrix mtx;
       load_mtx_file(entry.path().string(), mtx);
 
-      int num_rows = mtx.num_rows;
-      int num_cols = mtx.num_cols;
+      int m = mtx.num_rows;
+      int n = mtx.num_cols;
       long nnz = mtx.vals.size();
       std::vector<int> csr_rows = mtx.csr_rows;
       std::vector<int> coo_rows = mtx.coo_rows;
       std::vector<int> cols = mtx.cols;
       std::vector<float> vals = mtx.vals;
-      std::vector<float> res(num_rows, 0.0);
+      std::vector<float> y(m, 0.0);
 
       // initialize random vector
-      std::vector<float> vec(num_cols);
-      for (int i = 0; i < num_cols; i++) {
-        vec[i] = static_cast<float>(rand()) /
-                 (static_cast<float>(RAND_MAX / MAX_VECTOR_VALUE));
+      std::vector<float> x(n);
+      for (int i = 0; i < n; i++) {
+        x[i] = static_cast<float>(rand()) /
+               (static_cast<float>(RAND_MAX / MAX_VECTOR_VALUE));
       };
 
       // ====== compute reference vector with cpu
-      std::vector<float> cpu_reference(num_rows);
-      for (int i = 0; i < num_rows; i++) {
-        cpu_reference[i] = 0;
-      };
+      std::vector<float> cpu_reference(m, 0.0);
 
-      cpu_spmv(num_rows, num_cols, csr_rows, cols, vals, vec, cpu_reference);
+      cpu_spmv(m, n, csr_rows, cols, vals, x, cpu_reference);
 
       // ====== GPU memory allocation
-      float *gpu_vals, *gpu_vec, *gpu_res;
+      float *gpu_vals, *gpu_x, *gpu_y;
       int *gpu_csr_rows, *gpu_coo_rows, *gpu_cols;
 
       cudaMalloc(&gpu_csr_rows, csr_rows.size() * sizeof(int));
       cudaMalloc(&gpu_coo_rows, coo_rows.size() * sizeof(int));
       cudaMalloc(&gpu_cols, cols.size() * sizeof(int));
       cudaMalloc(&gpu_vals, vals.size() * sizeof(float));
-      cudaMalloc(&gpu_vec, num_cols * sizeof(float));
-      cudaMalloc(&gpu_res, num_rows * sizeof(float));
+      cudaMalloc(&gpu_x, n * sizeof(float));
+      cudaMalloc(&gpu_y, m * sizeof(float));
 
       cudaMemcpy(gpu_csr_rows, csr_rows.data(), csr_rows.size() * sizeof(int),
                  cudaMemcpyHostToDevice);
@@ -236,8 +325,7 @@ int main() {
                  cudaMemcpyHostToDevice);
       cudaMemcpy(gpu_vals, vals.data(), vals.size() * sizeof(float),
                  cudaMemcpyHostToDevice);
-      cudaMemcpy(gpu_vec, vec.data(), num_cols * sizeof(float),
-                 cudaMemcpyHostToDevice);
+      cudaMemcpy(gpu_x, x.data(), n * sizeof(float), cudaMemcpyHostToDevice);
 
       cudaEvent_t start, stop;
       cudaEventCreate(&start);
@@ -250,12 +338,12 @@ int main() {
       size_t bufferSize = 0;
       cusparseDnVecDescr_t vecX, vecY;
       cusparseSpMatDescr_t matA;
-      CHECK_CUSPARSE(cusparseCreateCsr(&matA, num_rows, num_cols, nnz,
-                                       gpu_csr_rows, gpu_cols, gpu_vals,
-                                       CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+      CHECK_CUSPARSE(cusparseCreateCsr(&matA, m, n, nnz, gpu_csr_rows, gpu_cols,
+                                       gpu_vals, CUSPARSE_INDEX_32I,
+                                       CUSPARSE_INDEX_32I,
                                        CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F));
-      CHECK_CUSPARSE(cusparseCreateDnVec(&vecX, num_cols, gpu_vec, CUDA_R_32F));
-      CHECK_CUSPARSE(cusparseCreateDnVec(&vecY, num_rows, gpu_res, CUDA_R_32F));
+      CHECK_CUSPARSE(cusparseCreateDnVec(&vecX, n, gpu_x, CUDA_R_32F));
+      CHECK_CUSPARSE(cusparseCreateDnVec(&vecY, m, gpu_y, CUDA_R_32F));
       CHECK_CUSPARSE(cusparseSpMV_bufferSize(
           handle, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, vecX, &beta,
           vecY, CUDA_R_32F, CUSPARSE_SPMV_ALG_DEFAULT, &bufferSize));
@@ -266,30 +354,41 @@ int main() {
       int numBlocks, cooBlocks, warpsPerBlock;
 
       for (int blockSize : {32, 64, 128, 256, 512, 1024}) {
-        numBlocks = (num_rows + blockSize - 1) / blockSize;
-        cooBlocks = (nnz + blockSize - 1) / blockSize;
-        kernels.push_back(
-            {"csr scalar", dim3(numBlocks), dim3(blockSize), [=]() {
-               csr_scalar<<<numBlocks, blockSize>>>(num_rows, gpu_csr_rows,
-                                                    gpu_cols, gpu_vals, gpu_vec,
-                                                    gpu_res);
-             }});
-
+        cooBlocks = div_ceil(nnz, blockSize);
         kernels.push_back({"coo flat", dim3(cooBlocks), dim3(blockSize), [=]() {
                              coo_flat<<<cooBlocks, blockSize>>>(
-                                 nnz, gpu_coo_rows, gpu_cols, gpu_vals, gpu_vec,
-                                 gpu_res);
+                                 nnz, gpu_coo_rows, gpu_cols, gpu_vals, gpu_x,
+                                 gpu_y);
                            }});
+
+        for (int interval_size : {128, 256, 1024, 4096, 8192}) {
+          int total_warps_needed = div_ceil(nnz, interval_size);
+          int warps_per_block = blockSize / 32;
+          int numBlocks = div_ceil(total_warps_needed, warpsPerBlock);
+
+          kernels.push_back(
+              {"coo seg chunksize=" + std::to_string(interval_size),
+               dim3(numBlocks), dim3(blockSize), [=]() {
+                 coo_segmented_reduction<<<numBlocks, blockSize>>>(
+                     nnz, interval_size, gpu_coo_rows, gpu_cols, gpu_vals,
+                     gpu_x, gpu_y);
+               }});
+        }
+
+        numBlocks = div_ceil(m, blockSize);
+        kernels.push_back(
+            {"csr scalar", dim3(numBlocks), dim3(blockSize), [=]() {
+               csr_scalar<<<numBlocks, blockSize>>>(m, gpu_csr_rows, gpu_cols,
+                                                    gpu_vals, gpu_x, gpu_y);
+             }});
 
         // 1 warp (32 threads) per row
         warpsPerBlock = blockSize / 32;
-        numBlocks = (num_rows + warpsPerBlock - 1) / warpsPerBlock;
-
+        numBlocks = div_ceil(m, warpsPerBlock);
         kernels.push_back(
             {"csr vector", dim3(numBlocks), dim3(blockSize), [=]() {
-               csr_vector<<<numBlocks, blockSize>>>(num_rows, gpu_csr_rows,
-                                                    gpu_cols, gpu_vals, gpu_vec,
-                                                    gpu_res);
+               csr_vector<<<numBlocks, blockSize>>>(m, gpu_csr_rows, gpu_cols,
+                                                    gpu_vals, gpu_x, gpu_y);
              }});
       }
 
@@ -305,7 +404,7 @@ int main() {
         avg_error = 0.0;
         avg_time = 0.0;
         for (int i = -WARMUP; i < NITER; i++) {
-          cudaMemset(gpu_res, 0, num_rows * sizeof(float));
+          cudaMemset(gpu_y, 0, m * sizeof(float));
 
           cudaEventRecord(start);
           task.launch();
@@ -317,18 +416,18 @@ int main() {
             CHECK_CUDA(cudaEventElapsedTime(&iter_time, start, stop));
             avg_time += iter_time;
 
-            cudaMemcpy(res.data(), gpu_res, num_rows * sizeof(float),
+            cudaMemcpy(y.data(), gpu_y, m * sizeof(float),
                        cudaMemcpyDeviceToHost);
-            avg_error += l2_error(num_rows, cpu_reference, res);
+            avg_error += l2_error(m, cpu_reference, y);
           }
         }
 
         avg_error = avg_error / NITER;
         avg_time = avg_time / NITER;
 
-        csv_file << filename << "," << num_rows << "," << num_cols << "," << nnz
-                 << "," << task.name << "," << task.grid.x << ","
-                 << task.block.x << "," << avg_time << "," << avg_error << "\n";
+        csv_file << filename << "," << m << "," << n << "," << nnz << ","
+                 << task.name << "," << task.grid.x << "," << task.block.x
+                 << "," << avg_time << "," << avg_error << "\n";
 
         csv_file << std::flush;
       }
@@ -339,9 +438,9 @@ int main() {
       cudaFree(gpu_csr_rows);
       cudaFree(gpu_coo_rows);
       cudaFree(gpu_cols);
-      cudaFree(gpu_res);
+      cudaFree(gpu_y);
       cudaFree(gpu_vals);
-      cudaFree(gpu_vec);
+      cudaFree(gpu_x);
 
       cudaFree(dBuffer);
       cusparseDestroyDnVec(vecX);

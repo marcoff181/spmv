@@ -24,7 +24,12 @@
 
 
 = Introduction
-https://medium.com/analytics-vidhya/sparse-matrix-vector-multiplication-with-cuda-42d191878e8f
+Sparse Matrix Vector multiplication (SpMV) is a fundamental problem in many computing fields. It is highly parallelizable and its performance is bounded by memory bandwidth.
+== Problem Statement
+SpMV is defined as the multiplication between $A$, a sparse matrix of size $m  times n$ and $x$, a dense vector of size $n$. The resulting vector $y$ is of size $m$.
+$ y = A x $
+== Why SpMV matters
+== Questions your investigation addresses
 = Methodology
 == Formats tested
 The sparse formats used in the study are CSR and COO.
@@ -34,8 +39,37 @@ CSR still uses three arrays, with the only change being that the rows array is c
 The compression is possible only if the non-zero elements are sorted by row index.
 The CSR format takes less storage than COO, however CSR-based SpMV algorithms that split tasks by row can suffer from load imbalance on sparse matrices with irregular nnz distribution along rows@req1.
 
+
 // TODO: mention attempt too use restrict to improove performance
-== CPU/GPU implementatioons
+== CPU implementation
+
+The CPU implementation is a simple iteration over all the non-zero elements. Its only goal is to provide a reference result to measure the error of the GPU implementations.
+
+```cpp
+for (int i = 0; i < m; ++i) {
+  for (int j = rows[i]; j < rows[i + 1]; ++j) {
+    y[i] += x[cols[j]] * vals[j];
+  }
+}
+```
+
+== GPU implementations
+One of the simplest ways to parallelize SpMV with COO is to use one thread per non-zero.
+This algorithm, commonly called _COO_flat_, assigns one thread for each non-zero element, then uses atomic adds to write the result to $y$.
+This approach offers maximum parallelism and load balancing, and a certain degree of coalescing as the COO is stored in row-major order.
+On the other hand the `atomicAdd` hurts the performance a lot, and with a high enough nnz we are not able to launch all threads together.
+
+```cpp
+int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+if (tid < nnz) {
+  int row = rows[tid];
+  int col = cols[tid];
+  atomicAdd(&y[row], vals[tid] * x[col]);
+}
+```
+
+
 
 == Validation method
 
@@ -70,6 +104,12 @@ The dataset chosen for benchmarking the various kernels is a subset of the 14 ma
     [Webbase], [1,000,005], [1,000,005], [3,105,536], 
   )
 ) <matrix-selection>
+
+== Parsing
+
+The `.mtx` format used by SuiteSparse stores matrices in COO, with column-major order. The parsing is done through the library `fast-matrix-market`, as the `.mtx` format allows a number of different representations to save space(standard, symmetric, skew-symmetric) meaning that writing a parser from scratch could lead to errors and/or distract from the main goal.
+After parsing we sort the matrix in row-major order, and then create a new vector with the rows in CSR format.
+The result is that we use row-major ordering for both COO and CSR, for consistence and ease of use when writing and comparing kernels.
 
 == Input Vector
 The `Float32` Input Vector is randomly generated with a fixed seed to guarantee reproducibility across runs. The user-defined parameter `MAX_VECTOR_VALUE` defines the upper bound to the randomly generated values.
