@@ -6,6 +6,7 @@
 #SBATCH --gres=gpu:1
 ##SBATCH --gres=gpu:a30.24:1
 ##SBATCH --gres=gpu:a100.80:1
+##SBATCH --gres=gpu:l40s:1
 #SBATCH --cpus-per-task=1
 #SBATCH --time=00:05:00
 

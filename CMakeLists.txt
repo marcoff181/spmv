@@ -23,7 +23,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(fast_matrix_market)
 
-add_executable(spmv spmv.cu matrix_loader.cpp)
+add_executable(spmv spmv.cu kernels.cu matrix_loader.cpp)
 find_package(CUDAToolkit REQUIRED)
 
 target_link_libraries(spmv

@@ -14,7 +14,8 @@ __global__ void coo_flat(int nnz, int *rows, int *cols, float *vals, float *x,
 
 // Adaptation of Graham 2009 COO algo
 // TODO: either remove restrict or add it everywhere
-// TODO: commented out first_idx logic to see if it affects algo
+// TODO: removed first_idx logic to see if it affects algo (it does not
+// make much difference, mention it in report)
 __global__ void coo_segmented_reduction(int nnz, int chunk_size,
                                         const int *__restrict__ rows,
                                         const int *__restrict__ cols,
@@ -31,8 +32,6 @@ __global__ void coo_segmented_reduction(int nnz, int chunk_size,
 
   if (chunk_start >= chunk_end)
     return;
-
-  int first_idx = rows[chunk_start];
 
   // Registers to hold the "carry" from the previous 32-element loop
   int carry_row = -1;
@@ -54,10 +53,7 @@ __global__ void coo_segmented_reduction(int nnz, int chunk_size,
         val += carry_val; // Row continues, add the previous sum
       } else {
         // Previous row finished. Write it out safely.
-        // if (carry_row == first_idx)
         atomicAdd(&y[carry_row], carry_val);
-        // else
-        // y[carry_row] += carry_val;
       }
     }
 
@@ -86,14 +82,10 @@ __global__ void coo_segmented_reduction(int nnz, int chunk_size,
       carry_val = val;
     } else if (active && row != next_row) {
       // The row ended inside this 32-element window. Write it out.
-      // if (row == first_idx)
       atomicAdd(&y[row], val);
-      // else
-      // y[row] += val; // Safe direct write (nobody else is touching this row)
     }
 
-    // The last thread broadcasts the carry to all other threads in the warp so
-    // Lane 0 can use it on next iteration
+    // get carry from last thread(only first thread will use it)
     carry_row = __shfl_sync(0xffffffff, carry_row, last_lane);
     carry_val = __shfl_sync(0xffffffff, carry_val, last_lane);
   }
