@@ -205,58 +205,6 @@ int main() {
       std::vector<KernelTask> kernels;
       int numBlocks, cooBlocks, warpsPerBlock;
 
-      int reccomended_blockSize;
-      int reccomended_minGridSize;
-      int reccomended_gridSize;
-
-      // cuda reccomended block sizes
-      cudaOccupancyMaxPotentialBlockSize(
-          &reccomended_minGridSize, &reccomended_blockSize, coo_flat, 0, 0);
-
-      cooBlocks = div_ceil(nnz, reccomended_blockSize);
-      kernels.push_back(
-          {"coo flat", dim3(cooBlocks), dim3(reccomended_blockSize), [=]() {
-             coo_flat<<<cooBlocks, reccomended_blockSize>>>(
-                 nnz, gpu_coo_rows, gpu_cols, gpu_vals, gpu_x, gpu_y);
-           }});
-
-      cudaOccupancyMaxPotentialBlockSize(&reccomended_minGridSize,
-                                         &reccomended_blockSize,
-                                         coo_segmented_reduction, 0, 0);
-
-      int total_warps_needed = div_ceil(nnz, 1024);
-      warpsPerBlock = reccomended_blockSize / 32;
-      numBlocks = div_ceil(total_warps_needed, warpsPerBlock);
-
-      kernels.push_back(
-          {"coo seg chunksize=" + std::to_string(1024), dim3(numBlocks),
-           dim3(reccomended_blockSize), [=]() {
-             coo_segmented_reduction<<<numBlocks, reccomended_blockSize>>>(
-                 nnz, 1024, gpu_coo_rows, gpu_cols, gpu_vals, gpu_x, gpu_y);
-           }});
-
-      cudaOccupancyMaxPotentialBlockSize(
-          &reccomended_minGridSize, &reccomended_blockSize, csr_scalar, 0, 0);
-
-      numBlocks = div_ceil(m, reccomended_blockSize);
-      kernels.push_back(
-          {"csr scalar", dim3(numBlocks), dim3(reccomended_blockSize), [=]() {
-             csr_scalar<<<numBlocks, reccomended_blockSize>>>(
-                 m, gpu_csr_rows, gpu_cols, gpu_vals, gpu_x, gpu_y);
-           }});
-
-      cudaOccupancyMaxPotentialBlockSize(
-          &reccomended_minGridSize, &reccomended_blockSize, csr_vector, 0, 0);
-
-      warpsPerBlock = reccomended_blockSize / 32;
-      numBlocks = div_ceil(m, warpsPerBlock);
-      kernels.push_back(
-          {"csr vector", dim3(numBlocks), dim3(reccomended_blockSize), [=]() {
-             csr_vector<<<numBlocks, reccomended_blockSize>>>(
-                 m, gpu_csr_rows, gpu_cols, gpu_vals, gpu_x, gpu_y);
-           }});
-
-      // iterate through other block sizes
       for (int blockSize : {32, 64, 128, 256, 512, 1024}) {
         cooBlocks = div_ceil(nnz, blockSize);
         kernels.push_back({"coo flat", dim3(cooBlocks), dim3(blockSize), [=]() {
