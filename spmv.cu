@@ -202,7 +202,7 @@ int main() {
       std::vector<KernelTask> kernels;
       int numBlocks, warpsPerBlock;
 
-      for (int blockSize : {32, 64, 128, 256, 512, 1024}) {
+      for (int blockSize = 32; blockSize <= 1024; blockSize += 16) {
         numBlocks = div_ceil(nnz, blockSize);
         kernels.push_back({"coo flat", dim3(numBlocks), dim3(blockSize), [=]() {
                              coo_flat<<<numBlocks, blockSize>>>(
@@ -227,8 +227,7 @@ int main() {
         // 128 is chunk size
         int total_warps_needed = div_ceil(nnz, 128);
         numBlocks = div_ceil(total_warps_needed, warpsPerBlock);
-        kernels.push_back({"coo seg chunksize=" + std::to_string(128),
-                           dim3(numBlocks), dim3(blockSize), [=]() {
+        kernels.push_back({"coo seg", dim3(numBlocks), dim3(blockSize), [=]() {
                              coo_segmented_reduction<<<numBlocks, blockSize>>>(
                                  nnz, 128, gpu_coo_rows, gpu_cols, gpu_vals,
                                  gpu_x, gpu_y);
