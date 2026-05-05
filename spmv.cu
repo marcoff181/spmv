@@ -40,13 +40,10 @@ template <typename T, typename U> inline T div_ceil(T n, U d) {
 }
 
 // TODO:
-// - FLOPs measurement
-// - more CSR kernels
 // - Cache performance measurements
 
 const std::string MATRIX_FOLDER = "matrices";
 const float MAX_VECTOR_VALUE = 100.0;
-// const double ERROR_THRESHOLD = 1e-5;
 
 struct KernelTask {
   std::string name;
@@ -203,45 +200,39 @@ int main() {
 
       // ====== kernels "tasks" list
       std::vector<KernelTask> kernels;
-      int numBlocks, cooBlocks, warpsPerBlock;
+      int numBlocks, warpsPerBlock;
 
       for (int blockSize : {32, 64, 128, 256, 512, 1024}) {
-        cooBlocks = div_ceil(nnz, blockSize);
-        kernels.push_back({"coo flat", dim3(cooBlocks), dim3(blockSize), [=]() {
-                             coo_flat<<<cooBlocks, blockSize>>>(
+        numBlocks = div_ceil(nnz, blockSize);
+        kernels.push_back({"coo flat", dim3(numBlocks), dim3(blockSize), [=]() {
+                             coo_flat<<<numBlocks, blockSize>>>(
                                  nnz, gpu_coo_rows, gpu_cols, gpu_vals, gpu_x,
                                  gpu_y);
                            }});
-
-        for (int chunk_size : {128, 256, 1024, 4096, 8192}) {
-          int total_warps_needed = div_ceil(nnz, chunk_size);
-          warpsPerBlock = blockSize / 32;
-          int numBlocks = div_ceil(total_warps_needed, warpsPerBlock);
-
-          kernels.push_back(
-              {"coo seg chunksize=" + std::to_string(chunk_size),
-               dim3(numBlocks), dim3(blockSize), [=]() {
-                 coo_segmented_reduction<<<numBlocks, blockSize>>>(
-                     nnz, chunk_size, gpu_coo_rows, gpu_cols, gpu_vals, gpu_x,
-                     gpu_y);
-               }});
-        }
-
-        numBlocks = div_ceil(m, blockSize);
         kernels.push_back(
             {"csr scalar", dim3(numBlocks), dim3(blockSize), [=]() {
                csr_scalar<<<numBlocks, blockSize>>>(m, gpu_csr_rows, gpu_cols,
                                                     gpu_vals, gpu_x, gpu_y);
              }});
 
-        // 1 warp (32 threads) per row
         warpsPerBlock = blockSize / 32;
+
         numBlocks = div_ceil(m, warpsPerBlock);
         kernels.push_back(
             {"csr vector", dim3(numBlocks), dim3(blockSize), [=]() {
                csr_vector<<<numBlocks, blockSize>>>(m, gpu_csr_rows, gpu_cols,
                                                     gpu_vals, gpu_x, gpu_y);
              }});
+
+        // 128 is chunk size
+        int total_warps_needed = div_ceil(nnz, 128);
+        numBlocks = div_ceil(total_warps_needed, warpsPerBlock);
+        kernels.push_back({"coo seg chunksize=" + std::to_string(128),
+                           dim3(numBlocks), dim3(blockSize), [=]() {
+                             coo_segmented_reduction<<<numBlocks, blockSize>>>(
+                                 nnz, 128, gpu_coo_rows, gpu_cols, gpu_vals,
+                                 gpu_x, gpu_y);
+                           }});
       }
 
       kernels.push_back({"CuSparse", dim3(0), dim3(0), [=]() {

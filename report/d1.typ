@@ -216,6 +216,7 @@ Timings are measured through Cuda Events, and only the kernel execution time is 
 FLOP/s are measured by dividing the number of required floating point operations ($"nnz"*2$) by the arithmetic mean of the execution time across the `NITER` runs.
 
 == Hardware/Software environment
+The experiments were run on the unitn _Baldo_ cluster on a _NVIDIA L40s 48GB_ graphic card. The program was compiled with _gcc_ version 13.3.0 and _cuda_ version 12.5.0 . 
 
 = Dataset
 == Sparse Matrices <ciao>
