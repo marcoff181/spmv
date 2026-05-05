@@ -276,7 +276,7 @@ int main() {
 
         avg_error = avg_error / NITER;
         avg_time_ms = avg_time_ms / NITER;
-        flops = nflop / (avg_time_ms * 1000); // convert ms to seconds
+        flops = nflop / (avg_time_ms / 1000); // convert ms to seconds
 
         csv_file << filename << "," << m << "," << n << "," << nnz << ","
                  << task.name << "," << task.grid.x << "," << task.block.x
