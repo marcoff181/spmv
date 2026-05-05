@@ -213,7 +213,7 @@ Each combination of kernel and launch parameters(block and grid size) is benchma
 The parameters `WARMUP,NITER` are user-defined, and were set respectively to 2 and 10 during all the experiments. 
 
 Timings are measured through Cuda Events, and only the kernel execution time is measured.
-FLOP/s are measured by dividing the number of required floating point operations $"nnz"*2$ by the arithmetic mean of the execution time across the `NITER` runs.
+FLOP/s are measured by dividing the number of required floating point operations ($"nnz"*2$) by the arithmetic mean of the execution time across the `NITER` runs.
 
 == Hardware/Software environment
 
