@@ -99,21 +99,21 @@ __global__ void coo_segmented_reduction(int nnz, int chunk_size,
 // Issue with access to cols and vals arrays, even though all items of row are
 // stored next to one another, each thread accesses one at a time
 __global__ void csr_scalar(int num_rows, int *rows, int *cols, float *vals,
-                           float *vec, float *res) {
+                           float *x, float *y) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
   if (tid < num_rows) {
     float sum = 0.0f;
 
     for (int j = rows[tid]; j < rows[tid + 1]; ++j) {
-      sum += vec[cols[j]] * vals[j];
+      sum += x[cols[j]] * vals[j];
     }
-    res[tid] = sum;
+    y[tid] = sum;
   }
 }
 
 __global__ void csr_vector(int num_rows, int *rows, int *cols, float *vals,
-                           float *vec, float *res) {
+                           float *x, float *y) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int warp_id = tid / 32;
   int lane = tid % 32;
@@ -126,7 +126,7 @@ __global__ void csr_vector(int num_rows, int *rows, int *cols, float *vals,
     float sum = 0.0;
 
     for (int j = row_start + lane; j < row_end; j += 32) {
-      sum += vec[cols[j]] * vals[j];
+      sum += x[cols[j]] * vals[j];
     }
 
     // threads talk to each other and group the sum
@@ -136,7 +136,7 @@ __global__ void csr_vector(int num_rows, int *rows, int *cols, float *vals,
 
     // one thread writes result
     if (lane == 0) {
-      res[row] += sum;
+      y[row] += sum;
     }
   }
 }

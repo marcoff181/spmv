@@ -89,7 +89,7 @@ namespace fs = std::filesystem;
 int main() {
 
   double avg_error;
-  float avg_time;
+  float avg_time_ms, nflop, flops;
 
   srand(0);
 
@@ -120,7 +120,7 @@ int main() {
            << total_max_concurrent_threads // Global hardware ceiling
            << std::endl;
   csv_file << "Matrix,Rows,Columns,nnz,Kernel,Grid_Size,Block_Size,Avg_Time(ms)"
-              ",Avg_Err\n";
+              ",Avg_Err,MFLOP/s\n";
 
   // ====== cusparse setup
   cusparseHandle_t handle;
@@ -139,6 +139,7 @@ int main() {
       int m = mtx.num_rows;
       int n = mtx.num_cols;
       long nnz = mtx.vals.size();
+      nflop = nnz * 2;
       std::vector<int> csr_rows = mtx.csr_rows;
       std::vector<int> coo_rows = mtx.coo_rows;
       std::vector<int> cols = mtx.cols;
@@ -253,7 +254,7 @@ int main() {
       // ====== task execution
       for (const KernelTask &task : kernels) {
         avg_error = 0.0;
-        avg_time = 0.0;
+        avg_time_ms = 0.0;
         for (int i = -WARMUP; i < NITER; i++) {
           cudaMemset(gpu_y, 0, m * sizeof(float));
 
@@ -265,7 +266,7 @@ int main() {
           if (i >= 0) {
             float iter_time = 0.0f;
             CHECK_CUDA(cudaEventElapsedTime(&iter_time, start, stop));
-            avg_time += iter_time;
+            avg_time_ms += iter_time;
 
             cudaMemcpy(y.data(), gpu_y, m * sizeof(float),
                        cudaMemcpyDeviceToHost);
@@ -274,11 +275,13 @@ int main() {
         }
 
         avg_error = avg_error / NITER;
-        avg_time = avg_time / NITER;
+        avg_time_ms = avg_time_ms / NITER;
+        flops = nflop / (avg_time_ms * 1000); // convert ms to seconds
 
         csv_file << filename << "," << m << "," << n << "," << nnz << ","
                  << task.name << "," << task.grid.x << "," << task.block.x
-                 << "," << avg_time << "," << avg_error << "\n";
+                 << "," << avg_time_ms << "," << avg_error << ","
+                 << flops / 1.e6 << "\n";
 
         csv_file << std::flush;
       }
