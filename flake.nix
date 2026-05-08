@@ -20,6 +20,8 @@
         packages = with pkgs; [
           python313
           python313Packages.scipy
+          python313Packages.pandas
+          python313Packages.matplotlib
 
           pkg-config
           openblas

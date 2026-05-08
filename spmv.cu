@@ -49,6 +49,7 @@ struct KernelTask {
   std::string name;
   dim3 grid;
   dim3 block;
+  bool format_is_coo;
   std::function<void()> launch;
 };
 
@@ -86,7 +87,9 @@ namespace fs = std::filesystem;
 int main() {
 
   double avg_error;
-  float avg_time_ms, nflop, flops;
+  float avg_time_ms, nflop, gflops, bandwidth;
+
+  int coo_memory, csr_memory;
 
   srand(0);
 
@@ -117,7 +120,7 @@ int main() {
            << total_max_concurrent_threads // Global hardware ceiling
            << std::endl;
   csv_file << "Matrix,Rows,Columns,nnz,Kernel,Grid_Size,Block_Size,Avg_Time(ms)"
-              ",Avg_Err,GFLOP/s\n";
+              ",Avg_Err,GFLOP/s,Bandwidth(GB/s)\n";
 
   // ====== cusparse setup
   cusparseHandle_t handle;
@@ -142,6 +145,11 @@ int main() {
       std::vector<int> cols = mtx.cols;
       std::vector<float> vals = mtx.vals;
       std::vector<float> y(m, 0.0);
+
+      coo_memory = nnz * sizeof(int) * 2 + nnz * sizeof(float) +
+                   m * sizeof(float) + n * sizeof(float);
+      csr_memory = (m + 1) * sizeof(int) + nnz * sizeof(float) +
+                   m * sizeof(float) + n * sizeof(float);
 
       // initialize random vector
       std::vector<float> x(n);
@@ -202,24 +210,23 @@ int main() {
       std::vector<KernelTask> kernels;
       int numBlocks, warpsPerBlock;
 
-      for (int blockSize = 32; blockSize <= 1024; blockSize += 16) {
+      for (int blockSize = 32; blockSize <= 1024; blockSize += 32) {
         numBlocks = div_ceil(nnz, blockSize);
-        kernels.push_back({"coo flat", dim3(numBlocks), dim3(blockSize), [=]() {
-                             coo_flat<<<numBlocks, blockSize>>>(
-                                 nnz, gpu_coo_rows, gpu_cols, gpu_vals, gpu_x,
-                                 gpu_y);
-                           }});
         kernels.push_back(
-            {"csr scalar", dim3(numBlocks), dim3(blockSize), [=]() {
+            {"coo flat", dim3(numBlocks), dim3(blockSize), true, [=]() {
+               coo_flat<<<numBlocks, blockSize>>>(nnz, gpu_coo_rows, gpu_cols,
+                                                  gpu_vals, gpu_x, gpu_y);
+             }});
+        kernels.push_back(
+            {"csr scalar", dim3(numBlocks), dim3(blockSize), false, [=]() {
                csr_scalar<<<numBlocks, blockSize>>>(m, gpu_csr_rows, gpu_cols,
                                                     gpu_vals, gpu_x, gpu_y);
              }});
 
         warpsPerBlock = blockSize / 32;
-
         numBlocks = div_ceil(m, warpsPerBlock);
         kernels.push_back(
-            {"csr vector", dim3(numBlocks), dim3(blockSize), [=]() {
+            {"csr vector", dim3(numBlocks), dim3(blockSize), false, [=]() {
                csr_vector<<<numBlocks, blockSize>>>(m, gpu_csr_rows, gpu_cols,
                                                     gpu_vals, gpu_x, gpu_y);
              }});
@@ -227,14 +234,14 @@ int main() {
         // 128 is chunk size
         int total_warps_needed = div_ceil(nnz, 128);
         numBlocks = div_ceil(total_warps_needed, warpsPerBlock);
-        kernels.push_back({"coo seg", dim3(numBlocks), dim3(blockSize), [=]() {
-                             coo_segmented_reduction<<<numBlocks, blockSize>>>(
-                                 nnz, 128, gpu_coo_rows, gpu_cols, gpu_vals,
-                                 gpu_x, gpu_y);
-                           }});
+        kernels.push_back(
+            {"coo seg", dim3(numBlocks), dim3(blockSize), true, [=]() {
+               coo_segmented_reduction<<<numBlocks, blockSize>>>(
+                   nnz, 128, gpu_coo_rows, gpu_cols, gpu_vals, gpu_x, gpu_y);
+             }});
       }
 
-      kernels.push_back({"CuSparse", dim3(0), dim3(0), [=]() {
+      kernels.push_back({"CuSparse", dim3(0), dim3(0), false, [=]() {
                            CHECK_CUSPARSE(cusparseSpMV(
                                handle, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
                                matA, vecX, &beta, vecY, CUDA_R_32F,
@@ -266,12 +273,15 @@ int main() {
 
         avg_error = avg_error / NITER;
         avg_time_ms = avg_time_ms / NITER;
-        flops = nflop / (avg_time_ms / 1000); // convert ms to seconds
+        gflops = nflop / avg_time_ms / 1000 / 1.e9; // convert ms to seconds
+        bandwidth = std::pow(1024, 3) *
+                    (task.format_is_coo ? coo_memory : csr_memory) /
+                    (avg_time_ms / 1000); // GB/s
 
         csv_file << filename << "," << m << "," << n << "," << nnz << ","
                  << task.name << "," << task.grid.x << "," << task.block.x
-                 << "," << avg_time_ms << "," << avg_error << ","
-                 << flops / 1.e9 << "\n";
+                 << "," << avg_time_ms << "," << avg_error << "," << gflops
+                 << "," << bandwidth << "\n";
 
         csv_file << std::flush;
       }

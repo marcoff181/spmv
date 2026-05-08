@@ -1,6 +1,5 @@
 
 #import "@preview/charged-ieee:0.1.4": ieee
-#import "@preview/lilaq:0.6.0" as lq
 
 #show: ieee.with(
   title: [A Typesetting System to Untangle the Scientific Writing Process],
@@ -57,11 +56,9 @@ The CPU implementation is a simple iteration over all the non-zero elements. Its
   caption: [Naive CPU implementation],
 
 ```cpp
-for (int i = 0; i < m; ++i) {
-  for (int j = rows[i]; j < rows[i + 1]; ++j) {
-    y[i] += x[cols[j]] * vals[j];
-  }
-}
+for each row i in [0, m):
+    for each nonzero j in [rows[i], rows[i+1]):
+        y[i] ← y[i] + vals[j] * x[cols[j]]
 ```
 ) <code:naivecpu>
 
@@ -76,11 +73,8 @@ On the other hand the `atomicAdd` hurts the performance a lot, and with a high e
 #figure(
   caption: [COO flat kernel],
 ```cpp
-if (tid < nnz) {
-  int row = rows[tid];
-  int col = cols[tid];
-  atomicAdd(&y[row], vals[tid] * x[col]);
-}
+if tid < nnz:
+    atomicAdd(y[rows[tid]], vals[tid] * x[cols[tid]])
 ```
 
 ) <code:naivecoo>
@@ -92,65 +86,45 @@ On each step the threads first calculate the multiplication for their assigned n
 The aggregated value is carried along through the `carry` register until a new row is found, then one thread writes the aggregated result to memory. This method drastically reduces the conflicts caused by `atomicAdd`, while guaranteeing memory coalescing and balanced distribution of non-zeros. 
 The biggest difference from the algorithm presented by Bell et.al. is the usage of the more modern `shfl` instructions for the segmented reduction instead of using shared memory. 
 
+
 #figure(
   caption: [COO segmented reduction kernel],
 ```cpp
-int lane = threadIdx.x & 31; 
-int warp_id = tid / 32;
+carry_row ← -1
+carry_val ← 0
 
-int chunk_start = warp_id * chunk_size;
-int chunk_end = min(chunk_start + chunk_size, nnz);
+for each tile of 32 nonzeros starting at n in [chunk_start, chunk_end):
 
-if (chunk_start >= chunk_end)
-  return;
+    Each lane i loads nonzero (row[n+i], val[n+i] * x[col[n+i]])
+    Inactive lanes (beyond chunk_end) load row = -1, val = 0
 
-int carry_row = -1;
-float carry_val = 0.0f;
+    // --- Merge with carry from previous tile 
+    Lane 0 checks its row against carry_row:
+        if row == carry_row:
+            val ← val + carry_val        
+        else:
+            atomicAdd(y[carry_row], carry_val)   
 
-for (int n = chunk_start; n < chunk_end; n += 32) {
-  int idx = n + lane;
-  bool active = (idx < chunk_end);
+    // --- segmented prefix sum (via shuffle) 
+    for offset = 1, 2, 4, 8, 16:
+        left_row, left_val ← values from lane (i - offset) 
+        if left_row == row:
+            val ← val + left_val         
 
-  int row = active ? rows[idx] : -1;
-  float val = active ? vals[idx] * x[cols[idx]] : 0.0f;
+    // --- Write completed rows, save carry 
+    next_row ← row of lane (i + 1)      
+    last_lane ← last active lane in tile
 
-  if (lane == 0 && n > chunk_start) {
-    if (row == carry_row) {
-      val += carry_val; 
-    } else {
-      atomicAdd(&y[carry_row], carry_val);
-    }
-  }
+    if lane == last_lane:
+        carry_row, carry_val ← row, val  
+    else if row ≠ next_row:
+        atomicAdd(y[row], val)           
 
-  for (int offset = 1; offset < 32; offset *= 2) {
-    int left_row = __shfl_up_sync(0xffffffff, row, offset);
-    float left_val = __shfl_up_sync(0xffffffff, val, offset);
+    carry_row, carry_val ← values held by last_lane (warp broadcast)
 
-    if (lane >= offset && left_row == row) {
-      val += left_val;
-    }
-  }
-
-  int next_row = __shfl_down_sync(0xffffffff, row, 1);
-
-  int last_lane = min(31, chunk_end - 1 - n);
-
-  if (lane == last_lane) {
-    carry_row = row;
-    carry_val = val;
-  } else if (active && row != next_row) {
-    atomicAdd(&y[row], val);
-  }
-
-  carry_row = __shfl_sync(0xffffffff, carry_row, last_lane);
-  carry_val = __shfl_sync(0xffffffff, carry_val, last_lane);
-}
-
-if (lane == 0 && carry_row != -1) {
-  atomicAdd(&y[carry_row], carry_val);
-}
+// --- Flush final carry 
+Lane 0: atomicAdd(y[carry_row], carry_val)
 ```
-
 ) <code:segmentedcoo>
 
 
@@ -163,14 +137,12 @@ It also has no memory coalescing, and using only one thread per row is an underu
 #figure(
   caption: [CSR scalar kernel],
 ```cpp
-if (tid < num_rows) {
-  float sum = 0.0f;
-
-  for (int j = rows[tid]; j < rows[tid + 1]; ++j) {
-    sum += x[cols[j]] * vals[j];
-  }
-  y[tid] = sum;
-}```
+if tid < num_rows:
+    sum ← 0
+    for each nonzero j in [rows[tid], rows[tid+1]):
+        sum ← sum + vals[j] * x[cols[j]]
+    y[tid] ← sum
+```
 
 ) <code:csrscalar>
 
@@ -180,27 +152,16 @@ To solve most of the issues of the scalar kernel we implement the _CSR_vector_ k
 #figure(
   caption: [CSR vector kernel],
 ```cpp
-int warp_id = tid / 32;
-int lane = tid % 32;
-int row = warp_id;
+if row < num_rows:
+    sum ← 0
+    for each nonzero j in [rows[row] + lane, rows[row+1]) with stride 32:
+        sum ← sum + vals[j] * x[cols[j]]
 
-if (row < num_rows) {
-  int row_start = rows[row];
-  int row_end = rows[row + 1];
-  float sum = 0.0;
+    for offset = 16, 8, 4, 2, 1:
+        sum ← sum + value from lane (i + offset)
 
-  for (int j = row_start + lane; j < row_end; j += 32) {
-    sum += x[cols[j]] * vals[j];
-  }
-
-  for (int offset = 16; offset > 0; offset /= 2) {
-    sum += __shfl_down_sync(0xffffffff, sum, offset);
-  }
-
-  if (lane == 0) {
-    y[row] += sum;
-  }
-}
+    if lane == 0:
+        y[row] ← sum
 ```
 
 ) <code:csrvector>
@@ -256,65 +217,34 @@ The result is that we use row-major ordering for both COO and CSR, for consisten
 The `Float32` Input Vector is randomly generated with a fixed seed to guarantee reproducibility across runs. The user-defined parameter `MAX_VECTOR_VALUE` defines the upper bound to the randomly generated values.
 
 = Results
+@fig:plot1 shows the average performance of each kernel across all 10 matrices, grouped by the experimented block size. The red dotted line shows the average performance of the CuSparse library over all of the matrices. We can see that starting from 128 threads per block the performance of al kernels stabilizes, and increasing past that number does not improve, and in some cases worsens the performance.
+#figure(
+  caption: [Aggregate Performance related to Block Size],
+image("../results/plot1_blocksize_vs_gflops.png")
+) <fig:plot1>
+
+@fig:plot2, @fig:plot3, @fig:plot4 shows the best performance with a fixed block size of 128 of the 4 kernels for each matrix. In the three plots the matrices are respectively sorted by increasing density, variance of nnz per row, and total nnz. We use line plots instead of bar plots to better visualize trends across the 10 matrices.
+
+#figure(
+  caption: [Kernel best performance for each matrix, sorted by matrix density],
+image("../results/plot2_density_sorted_performance.png")
+) <fig:plot2>
+
+#figure(
+  caption: [Kernel best performance for each matrix, sorted by variance of nnz per row],
+image("../results/plot3_variance_sorted_performance.png")
+) <fig:plot3>
+
+#figure(
+  caption: [Kernel best performance for each matrix, sorted by total nnz],
+image("../results/plot4_nnz_sorted_performance.png")
+) <fig:plot4>
+
+We briefly attempted to measure cache usage by choosing a fixed block size, and profiling one kernel at a time with `ncu` but found out that the unitn _Baldo_ cluster did not allow access to NVIDIA GPU performance counters. Not having access to other GPUs we had to abandon the profiling attempt.
 
 = Discussion
 
 = Conclusion
+_COO flat_, as expected, is the worst performing algorithm on average. It performs best with the very small matrices, dropping down quickly on larger.
 
-// == Paper overview
-// In this paper we introduce Typst, a new typesetting system designed to streamline the scientific writing process and provide researchers with a fast, efficient, and easy-to-use alternative to existing systems. Our goal is to shake up the status quo and offer researchers a better way to approach scientific writing.
-//
-// By leveraging advanced algorithms and a user-friendly interface, Typst offers several advantages over existing typesetting systems, including faster document creation, simplified syntax, and increased ease-of-use.
-//
-// To demonstrate the potential of Typst, we conducted a series of experiments comparing it to other popular typesetting systems, including LaTeX. Our findings suggest that Typst offers several benefits for scientific writing, particularly for novice users who may struggle with the complexities of LaTeX. Additionally, we demonstrate that Typst offers advanced features for experienced users, allowing for greater customization and flexibility in document creation.
-//
-// Overall, we believe that Typst represents a significant step forward in the field of scientific writing and typesetting, providing researchers with a valuable tool to streamline their workflow and focus on what really matters: their research. In the following sections, we will introduce Typst in more detail and provide evidence for its superiority over other typesetting systems in a variety of scenarios.
-//
-// = Methods <sec:methods>
-// #lorem(45)
-//
-// $ a + b = gamma $ <eq:gamma>
-//
-// #lorem(80)
-//
-// #figure(
-//   placement: none,
-//   circle(radius: 15pt),
-//   caption: [A circle representing the Sun.]
-// ) <fig:sun>
-//
-// In @fig:sun you can see a common representation of the Sun, which is a star that is located at the center of the solar system.
-//
-// #lorem(120)
-//
-// #figure(
-//   caption: [The Planets of the Solar System and Their Average Distance from the Sun],
-//   placement: top,
-//   table(
-//     // Table styling is not mandated by the IEEE. Feel free to adjust these
-//     // settings and potentially move them into a set rule.
-//     columns: (6em, auto),
-//     align: (left, right),
-//     inset: (x: 8pt, y: 4pt),
-//     stroke: (x, y) => if y <= 1 { (top: 0.5pt) },
-//     fill: (x, y) => if y > 0 and calc.rem(y, 2) == 0  { rgb("#efefef") },
-//
-//     table.header[Planet][Distance (million km)],
-//     [Mercury], [57.9],
-//     [Venus], [108.2],
-//     [Earth], [149.6],
-//     [Mars], [227.9],
-//     [Jupiter], [778.6],
-//     [Saturn], [1,433.5],
-//     [Uranus], [2,872.5],
-//     [Neptune], [4,495.1],
-//   )
-// ) <tab:planets>
-//
-// In @tab:planets, you see the planets of the solar system and their average distance from the Sun.
-// The distances were calculated with @eq:gamma that we presented in @sec:methods.
-//
-// #lorem(240)
-//
-// #lorem(240)
-// lorem(240)
+// TODO: add bandwitdh
