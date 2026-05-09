@@ -235,7 +235,7 @@ int main() {
                                                     gpu_vals, gpu_x, gpu_y);
              }});
 
-        for (int chunkSize = 32; chunkSize <= 1024; chunkSize += 32) {
+        for (int chunkSize = 64; chunkSize <= 1024; chunkSize += 64) {
           int total_warps_needed = div_ceil(nnz, chunkSize);
           numBlocks = div_ceil(total_warps_needed, warpsPerBlock);
           kernels.push_back(
