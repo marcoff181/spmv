@@ -49,6 +49,7 @@ struct KernelTask {
   std::string name;
   dim3 grid;
   dim3 block;
+  int chunk_size;
   bool format_is_coo;
   std::function<void()> launch;
 };
@@ -119,7 +120,8 @@ int main() {
            << prop.maxThreadsPerBlock << ","
            << total_max_concurrent_threads // Global hardware ceiling
            << std::endl;
-  csv_file << "Matrix,Rows,Columns,nnz,Kernel,Grid_Size,Block_Size,Avg_Time(ms)"
+  csv_file << "Matrix,Rows,Columns,nnz,Kernel,Grid_Size,Block_Size,Chunk_Size,"
+              "Avg_Time(ms)"
               ",Avg_Err,GFLOP/s,Bandwidth(GB/s)\n";
 
   // ====== cusparse setup
@@ -213,14 +215,14 @@ int main() {
       for (int blockSize = 32; blockSize <= 1024; blockSize += 32) {
         numBlocks = div_ceil(nnz, blockSize);
         kernels.push_back(
-            {"coo flat", dim3(numBlocks), dim3(blockSize), true, [=]() {
+            {"coo flat", dim3(numBlocks), dim3(blockSize), 0, true, [=]() {
                coo_flat<<<numBlocks, blockSize>>>(nnz, gpu_coo_rows, gpu_cols,
                                                   gpu_vals, gpu_x, gpu_y);
              }});
 
         numBlocks = div_ceil(m, blockSize);
         kernels.push_back(
-            {"csr scalar", dim3(numBlocks), dim3(blockSize), false, [=]() {
+            {"csr scalar", dim3(numBlocks), dim3(blockSize), 0, false, [=]() {
                csr_scalar<<<numBlocks, blockSize>>>(m, gpu_csr_rows, gpu_cols,
                                                     gpu_vals, gpu_x, gpu_y);
              }});
@@ -228,22 +230,25 @@ int main() {
         warpsPerBlock = blockSize / 32;
         numBlocks = div_ceil(m, warpsPerBlock);
         kernels.push_back(
-            {"csr vector", dim3(numBlocks), dim3(blockSize), false, [=]() {
+            {"csr vector", dim3(numBlocks), dim3(blockSize), 0, false, [=]() {
                csr_vector<<<numBlocks, blockSize>>>(m, gpu_csr_rows, gpu_cols,
                                                     gpu_vals, gpu_x, gpu_y);
              }});
 
-        // 128 is chunk size
-        int total_warps_needed = div_ceil(nnz, 128);
-        numBlocks = div_ceil(total_warps_needed, warpsPerBlock);
-        kernels.push_back(
-            {"coo seg", dim3(numBlocks), dim3(blockSize), true, [=]() {
-               coo_segmented_reduction<<<numBlocks, blockSize>>>(
-                   nnz, 128, gpu_coo_rows, gpu_cols, gpu_vals, gpu_x, gpu_y);
-             }});
+        for (int chunkSize = 32; chunkSize <= 1024; chunkSize += 32) {
+          int total_warps_needed = div_ceil(nnz, chunkSize);
+          numBlocks = div_ceil(total_warps_needed, warpsPerBlock);
+          kernels.push_back(
+              {"coo seg", dim3(numBlocks), dim3(blockSize), chunkSize, true,
+               [=]() {
+                 coo_segmented_reduction<<<numBlocks, blockSize>>>(
+                     nnz, chunkSize, gpu_coo_rows, gpu_cols, gpu_vals, gpu_x,
+                     gpu_y);
+               }});
+        }
       }
 
-      kernels.push_back({"CuSparse", dim3(0), dim3(0), false, [=]() {
+      kernels.push_back({"CuSparse", dim3(0), dim3(0), 0, false, [=]() {
                            CHECK_CUSPARSE(cusparseSpMV(
                                handle, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
                                matA, vecX, &beta, vecY, CUDA_R_32F,
@@ -281,8 +286,8 @@ int main() {
 
         csv_file << filename << "," << m << "," << n << "," << nnz << ","
                  << task.name << "," << task.grid.x << "," << task.block.x
-                 << "," << avg_time_ms << "," << avg_error << "," << gflops
-                 << "," << bandwidth << "\n";
+                 << "," << task.chunk_size << "," << avg_time_ms << ","
+                 << avg_error << "," << gflops << "," << bandwidth << "\n";
 
         csv_file << std::flush;
       }

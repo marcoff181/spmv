@@ -248,3 +248,4 @@ We briefly attempted to measure cache usage by choosing a fixed block size, and 
 _COO flat_, is the worst performing algorithm on average. It performs best with the very small matrices, dropping down quickly on larger.
 
 // TODO: add bandwitdh
+// TODO: do best performance with best block size
