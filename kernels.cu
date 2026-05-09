@@ -1,7 +1,9 @@
 #include "kernels.cuh"
 
-__global__ void coo_flat(int nnz, int *rows, int *cols, float *vals, float *x,
-                         float *y) {
+__global__ void coo_flat(int nnz, const int *__restrict__ rows,
+                         const int *__restrict__ cols,
+                         const float *__restrict__ vals,
+                         const float *__restrict__ x, float *__restrict__ y) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
   if (tid < nnz) {
@@ -24,7 +26,7 @@ __global__ void coo_segmented_reduction(int nnz, int chunk_size,
                                         float *__restrict__ y) {
 
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  int lane = threadIdx.x & 31; // id within the warp (0-31)
+  int lane = threadIdx.x % 32;
   int warp_id = tid / 32;
 
   int chunk_start = warp_id * chunk_size;
@@ -98,22 +100,30 @@ __global__ void coo_segmented_reduction(int nnz, int chunk_size,
 
 // Issue with access to cols and vals arrays, even though all items of row are
 // stored next to one another, each thread accesses one at a time
-__global__ void csr_scalar(int m, int *rows, int *cols, float *vals, float *x,
-                           float *y) {
+__global__ void csr_scalar(int m, const int *__restrict__ rows,
+                           const int *__restrict__ cols,
+                           const float *__restrict__ vals,
+                           const float *__restrict__ x, float *__restrict__ y) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
   if (tid < m) {
     float sum = 0.0f;
 
-    for (int j = rows[tid]; j < rows[tid + 1]; ++j) {
+    int row_start = rows[tid];
+    int row_end = rows[tid + 1];
+
+    for (int j = row_start; j < row_end; ++j) {
       sum += x[cols[j]] * vals[j];
     }
+
     y[tid] = sum;
   }
 }
 
-__global__ void csr_vector(int m, int *rows, int *cols, float *vals, float *x,
-                           float *y) {
+__global__ void csr_vector(int m, const int *__restrict__ rows,
+                           const int *__restrict__ cols,
+                           const float *__restrict__ vals,
+                           const float *__restrict__ x, float *__restrict__ y) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int warp_id = tid / 32;
   int lane = tid % 32;
@@ -129,14 +139,14 @@ __global__ void csr_vector(int m, int *rows, int *cols, float *vals, float *x,
       sum += x[cols[j]] * vals[j];
     }
 
-    // threads talk to each other and group the sum
+    // shuffle warp reduction
     for (int offset = 16; offset > 0; offset /= 2) {
       sum += __shfl_down_sync(0xffffffff, sum, offset);
     }
 
     // one thread writes result
     if (lane == 0) {
-      y[row] += sum;
+      y[row] = sum;
     }
   }
 }
