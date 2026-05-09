@@ -98,11 +98,11 @@ __global__ void coo_segmented_reduction(int nnz, int chunk_size,
 
 // Issue with access to cols and vals arrays, even though all items of row are
 // stored next to one another, each thread accesses one at a time
-__global__ void csr_scalar(int num_rows, int *rows, int *cols, float *vals,
-                           float *x, float *y) {
+__global__ void csr_scalar(int m, int *rows, int *cols, float *vals, float *x,
+                           float *y) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
-  if (tid < num_rows) {
+  if (tid < m) {
     float sum = 0.0f;
 
     for (int j = rows[tid]; j < rows[tid + 1]; ++j) {
@@ -112,15 +112,15 @@ __global__ void csr_scalar(int num_rows, int *rows, int *cols, float *vals,
   }
 }
 
-__global__ void csr_vector(int num_rows, int *rows, int *cols, float *vals,
-                           float *x, float *y) {
+__global__ void csr_vector(int m, int *rows, int *cols, float *vals, float *x,
+                           float *y) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int warp_id = tid / 32;
   int lane = tid % 32;
 
   int row = warp_id;
 
-  if (row < num_rows) {
+  if (row < m) {
     int row_start = rows[row];
     int row_end = rows[row + 1];
     float sum = 0.0;

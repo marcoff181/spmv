@@ -63,7 +63,7 @@ void cpu_spmv(int m, int n, const std::vector<int> &rows,
   }
 }
 
-double l2_error(int len, const std::vector<float> &reference,
+double l2_error(const std::vector<float> &reference,
                 const std::vector<float> &comparison) {
   // L2 norm of reference
   double ref_sum_sq = std::inner_product(reference.begin(), reference.end(),
@@ -89,7 +89,7 @@ int main() {
   double avg_error;
   float avg_time_ms, nflop, gflops, bandwidth;
 
-  int coo_memory, csr_memory;
+  double coo_memory, csr_memory;
 
   srand(0);
 
@@ -148,8 +148,8 @@ int main() {
 
       coo_memory = nnz * sizeof(int) * 2 + nnz * sizeof(float) +
                    m * sizeof(float) + n * sizeof(float);
-      csr_memory = (m + 1) * sizeof(int) + nnz * sizeof(float) +
-                   m * sizeof(float) + n * sizeof(float);
+      csr_memory = (m + 1) * sizeof(int) + nnz * sizeof(int) +
+                   nnz * sizeof(float) + m * sizeof(float) + n * sizeof(float);
 
       // initialize random vector
       std::vector<float> x(n);
@@ -217,6 +217,8 @@ int main() {
                coo_flat<<<numBlocks, blockSize>>>(nnz, gpu_coo_rows, gpu_cols,
                                                   gpu_vals, gpu_x, gpu_y);
              }});
+
+        numBlocks = div_ceil(m, blockSize);
         kernels.push_back(
             {"csr scalar", dim3(numBlocks), dim3(blockSize), false, [=]() {
                csr_scalar<<<numBlocks, blockSize>>>(m, gpu_csr_rows, gpu_cols,
@@ -267,16 +269,15 @@ int main() {
 
             cudaMemcpy(y.data(), gpu_y, m * sizeof(float),
                        cudaMemcpyDeviceToHost);
-            avg_error += l2_error(m, cpu_reference, y);
+            avg_error += l2_error(cpu_reference, y);
           }
         }
 
         avg_error = avg_error / NITER;
         avg_time_ms = avg_time_ms / NITER;
-        gflops = nflop / avg_time_ms / 1000 / 1.e9; // convert ms to seconds
-        bandwidth = std::pow(1024, 3) *
-                    (task.format_is_coo ? coo_memory : csr_memory) /
-                    (avg_time_ms / 1000); // GB/s
+        gflops = nflop / avg_time_ms * 1000 / 1.e9; // GFLOP/s
+        bandwidth = (task.format_is_coo ? coo_memory : csr_memory) /
+                    avg_time_ms * 1000 / std::pow(1024, 3); // GB/s
 
         csv_file << filename << "," << m << "," << n << "," << nnz << ","
                  << task.name << "," << task.grid.x << "," << task.block.x
