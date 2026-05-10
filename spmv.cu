@@ -282,7 +282,7 @@ int main() {
         avg_time_ms = avg_time_ms / NITER;
         gflops = nflop / avg_time_ms * 1000 / 1.e9; // GFLOP/s
         bandwidth = (task.format_is_coo ? coo_memory : csr_memory) /
-                    avg_time_ms * 1000 / std::pow(1024, 3); // GB/s
+                    avg_time_ms * 1000 / 1.e9; // GB/s
 
         csv_file << filename << "," << m << "," << n << "," << nnz << ","
                  << task.name << "," << task.grid.x << "," << task.block.x
