@@ -15,7 +15,6 @@ __global__ void coo_flat(int nnz, const int *__restrict__ rows,
 }
 
 // Adaptation of Graham 2009 COO algo
-// TODO: either remove restrict or add it everywhere
 // TODO: removed first_idx logic to see if it affects algo (it does not
 // make much difference, mention it in report)
 __global__ void coo_segmented_reduction(int nnz, int chunk_size,

@@ -4,7 +4,7 @@
 #show: ieee.with(
   title: [Deliverable 1],
   abstract: [
-This report evaluates the performance of GPU-based Sparse Matrix-Vector multiplication (SpMV) kernels across the CSR and COO storage formats. Through experiments on NVIDIA hardware, it compares different kernel implementations analyzing the impact of memory coalescing, load balancing and storage format.
+This report evaluates the performance of GPU-based Sparse Matrix-Vector multiplication (SpMV) kernels across the CSR and COO storage formats. Through experiments on NVIDIA hardware, it compares different kernel implementations, analyzing the impact of memory coalescing, load balancing and storage format.
   ],
   authors: (
     (
@@ -41,8 +41,6 @@ The compression assumes that the non-zero elements are sorted by row index.
 The CSR format takes less storage than COO, however CSR-based SpMV algorithms that split tasks by row can suffer from load imbalance on sparse matrices with irregular nnz distribution along rows@req1.
 
 
-// TODO: mention attempt too use restrict to improove performance
-// TODO: talk about difference in bandwidth between COO and CSR
 // == CPU implementation
 
 The CPU SpMV implementation is a simple iteration over all the non-zero elements. Its only goal is to provide a reference result to measure the error of the GPU implementations.
@@ -156,18 +154,18 @@ if row < num_rows:
 
 ) <code:csrvector>
 == Validation method
-First the result $y_c$ is calculated using the CPU algorithm, then for each execution of a kernel the result $y_k$ is compared by dividing the l2 norm of the difference by the l2 norm of the reference. For all methods the error does not reach magnitudes over $10^(-7)$.
+First, the result $y_c$ is calculated using the CPU algorithm, then for each execution of a kernel the result $y_k$ is compared by dividing the $L_2$ norm of the difference by the l2 norm of the reference. For all methods the error does not reach magnitudes over $10^(-7)$.
 $ "err" = (|| y_c - y_k ||_2 )/( ||y_c||_2 ) $
 
 == Measurement methodology
 Each combination of kernel and launch parameters(block and grid size) is benchmarked by first launching the kernel `WARMUP` times without logging the results, and then by running it another `NITER` times, then computing the average of each measurement across runs.
 The parameters `WARMUP,NITER` are user-defined, and were set respectively to 2 and 10 during all the experiments. 
 
-Timings are measured through Cuda Events, and only the kernel execution time is measured.
+Timings are measured through CUDA Events, and only the kernel execution time is measured.
 FLOP/s are measured by dividing the number of required floating point operations ($"nnz"*2$) by the arithmetic mean of the execution time across the `NITER` runs. Bandwidth is measured by calculating total space occupied by the arrays `rows,cols,values,x,y` for COO and for CSR, and dividing by the arithmetic mean of the execution time.
 
 == Hardware/Software environment
-The experiments were run on the unitn _Baldo_ cluster on a _NVIDIA A30 24GB_ graphic card.
+The experiments were run on the UniTN _Baldo_ cluster on a _NVIDIA A30 24GB_ graphic card.
 The program was compiled with _gcc_ version 13.3.0 and _cuda_ version 12.5.0 . 
 The code is publicly available at this link: #link("https://github.com/marcoff181/spmv" ).
 
@@ -205,9 +203,11 @@ The result is that we use row-major ordering for both COO and CSR, for consisten
 The `Float32` Input Vector is randomly generated with a fixed seed to guarantee reproducibility across runs. The user-defined parameter `MAX_VECTOR_VALUE` defines the upper bound to the randomly generated values.
 
 = Results
+
 @fig:plot1, @fig:plot1b show the average bandwidth and GFLOP/s of each kernel across all 10 matrices, grouped by the experimented block size.
 // @fig:plot1c shows the effect of changing chunk size in _COO seg_.
- @fig:plot4 shows the best kernel runtime for each matrix, matrices are storted by total nnz.
+ @fig:plot4 shows the best kernel runtime for each matrix, matrices are sorted by total nnz. The runtime axis uses a logarithmic scale.
+ An interesting detail is how comparing algorithms that use different storage formats using the bandwidth metric can be deceiving: in @fig:plot1b the performance of _COO seg_ seems to match _CuSparse_, but the reason is that COO uses more memory, thus inflating the bandwidth measurement(CuSparse uses CSR).
 
 #figure(
   caption: [Aggregate GFLOP/s related to Block Size],
@@ -242,26 +242,28 @@ image("../results/plot4_nnz_sorted_runtime.png")
 
 We briefly attempted to measure cache usage by choosing a fixed block size, and profiling one kernel at a time with `ncu` but found out that the unitn _Baldo_ cluster did not allow access to NVIDIA GPU performance counters.
 
+// We introduced some compiler optimizations like the usage of `__restrict` to inform the compiler that the various arrays do not alias, and the usage of `#pragma unroll` on the shuffle-reduce loops. We then benchmarked the code with and without these optimizations and did not measure any relevant performance change, as the compiler likely already performed 
+
 = Discussion
 The NVIDIA A30 supports at most 32 resident blocks per SM, and has 56 SMs.
 This means that when setting blocksize to 32 we have 32$times$32=1024 threads per SM, while the A30 supports up to 2048 threads per SM, which is reached with blocksizes of 64 and above.
 With this information we can explain the performance drop at blocksize 32 in @fig:plot1 and @fig:plot1b as being caused by not being at full occupancy.
 Because SpMV is highly memory-bound, having 50% occupancy results in the SM running out of active warps to switch to while the rest of the warps are waiting for the memory access.
 == CSR scalar
-_CSR scalar_ is the kernel that allocates the least amount of threads($m$) out of all the kernels. For a smaller matrix such as _pdb1HYS_ it allocates just $approx 37 k$ threads. The max warps per SM of the NVIDIA A30 are 64, which means that the amount of threads needed to reach full occupancy is $32*64*56=114688$. // threads per warp * warp per SM * #SMs
+_CSR scalar_ is the kernel that allocates the least amount of threads($m$) out of all the kernels. For a smaller matrix such as _pdb1HYS_ it allocates just $approx 37 k$ threads. The maximum number of warps per SM of the NVIDIA A30 are 64, which means that the amount of threads needed to reach full occupancy is $32*64*56=114688$. // threads per warp * warp per SM * #SMs
 The decreasing performance of _CSR scalar_ when increasing block size in @fig:plot1 is caused by the increasing granularity in work distribution:
 - with matrices that have a high variance of nnz/row different blocks have different memory requirements based on how many nonzero they need to load in all their assigned rows. If the blocks are bigger, memory requirements of different blocks can vary more, and the effect of scheduling a "heavy" block on one SM becomes more noticeable, as it will stall execution when the other SMs are already finished. With small block sizes, this issue is mostly mitigated by the block scheduler. 
 - Another compounding issue is that on smaller matrices like _pdb1HYS_ with a high enough block size we aren't even able to occupy all SMs, further penalizing the bandwidth.
 Ultimately, _CSR scalar_ does not coalesce memory access, as threads within the same warp access different rows of the matrix, further hurting performance.
 
 == CSR vector
-_CSR vector_ allocates 32 times more threads then _CSR scalar_, reducing occupancy concerns, and most importantly adopts memory coalescing inside the warp, where the 32 threads access the row with a stride. 
-Most of the dataset matrices don't have rows long enough to see the full benefit of the coalescing, and wee see a big performance penalty with matrices that have on average less than 32 non-zeros per row(see @matrix-selection, @fig:plot4).
+_CSR vector_ allocates 32 times more threads than _CSR scalar_, reducing occupancy concerns, and most importantly adopts memory coalescing inside the warp, where the 32 threads access the row with a stride. 
+Most of the dataset matrices don't have rows long enough to see the full benefit of the coalescing, and we see a big performance penalty with matrices that have on average less than 32 non-zeros per row(see @matrix-selection, @fig:plot4).
 This is caused by the fact that with less than 32 nonzeros some threads never do any work, as they are not assigned to a non-zero. We can see that around $approx 60$ non-zero per row the performance matches _CSR scalar_. With _pdb1HYS_ we have enough non-zero per row to balance the overhead of the shuffle reduction and see the benefits of memory coalescing, outperforming _CSR scalar_(which on the contrary is penalized by the long rows).
 
 == COO flat
 _COO flat_ has a reasonable performance only when working on matrices that are both:
-- with a low number of nonzeros per row: less conflifct on the atomicAdd
+- with a low number of nonzeros per row: less conflict on the atomicAdd
 - highly irregular and with high variance: it benefits from the inherent load balancing of assigning one thread per nonzero 
 It also achieves memory coalescing on the rows,cols and values arrays(if COO is sorted by row such as in our test).
 Nonetheless, the overhead of thread scheduling and especially of the atomicAdd impacts the final performance considerably.
@@ -278,7 +280,7 @@ COO based methods are instead unaffected by this distribution thanks to the nonz
 
 = Conclusion
 One key takeaway is the importance of dataset choice when benchmarking these kinds of algorithms that are very dependent on problem structure.
-Having to choose just 10 matrices was necessary to keep execution times faster and allowing fast iteration, while complete articles on the topic can afford to benchmark their algorithms on the entire SuiteSparse dataset.
+Having to choose just 10 matrices was necessary to keep execution times low and allow for fast iteration, while complete articles on the topic can afford to benchmark their algorithms on the entire SuiteSparse dataset.
 Correctly choosing 10 matrices that properly challenge all the kernels is not a trivial task, especially if it's done at the beginning of the research work.
 _Webbase-1M_ is a good example of a matrix that helps highlight weaknesses in certain kernels, and without it one could see @fig:plot4 and be inclined to think that _CSR scalar_ performs as well as _COO seg_. 
-On the more practical side, setting up a standardized way to launch and benchmark different kernel+block size configurations was very useful during the implementation of the kernels. Another useful detail to lessen delay when running on the cluster was making a `sbatch` request for any kind of GPU, and then letting the job compile the code matching the right architecture before running it. This reduced wait times for job scheduling to nearly zero.
+On the more practical side, setting up a standardized way to launch and benchmark different kernel+block size configurations was very useful during the implementation of the kernels. Another useful detail to lessen delay when running on the cluster was making a `sbatch` request for any kind of GPU, and then letting the job compile the code matching the right architecture before running it. 

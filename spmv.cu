@@ -39,9 +39,6 @@ template <typename T, typename U> inline T div_ceil(T n, U d) {
   return (n + d - 1) / d;
 }
 
-// TODO:
-// - Cache performance measurements
-
 const std::string MATRIX_FOLDER = "matrices";
 const float MAX_VECTOR_VALUE = 100.0;
 
