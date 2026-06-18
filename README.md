@@ -1,4 +1,4 @@
-# GPU-computing course 25/26
+# GPU-computing course 25/26 - Filippo Marcon 268173
 Evaluation of different SpMV kernels on NVIDIA GPUs.
 ## How to reproduce
 This project uses cmake, if you are on a machine which has a NVIDIA GPU available directly you can either use `just` or take a look at the [Justfile](justfile) and use those commands. Results will be saved to `results.csv`.
